@@ -1,0 +1,1302 @@
+/* ---------- theme tokens ----------
+   Light is the default theme; dark is applied via <html data-theme="dark">.
+   Keep every colour in this file expressed through these tokens so both
+   themes stay in sync. */
+
+:root {
+  --bg: #f4f6fb;
+  --bg-elevated: #ffffff;
+  --bg-panel: #eef2f9;
+  --bg-input: #ffffff;
+  --bg-hover: #e6eefb;
+  --bg-wave: #ffffff;
+  --bg-chip: #eef3fb;
+
+  --border: #dce3ef;
+  --border-strong: #c4d0e4;
+
+  --text: #16203a;
+  --text-dim: #5d6c89;
+
+  --accent: #0284c7;
+  --accent-strong: #0369a1;
+  --on-accent: #ffffff;
+
+  --danger: #dc2626;
+  --danger-border: #f3b4b4;
+  --warn: #b45309;
+  --ok: #047857;
+
+  /* Needs-a-human-review marker. Deliberately louder than --warn: an amber
+     hairline on a white row was easy to miss while scrubbing. Text uses the
+     darker orange (5.2:1 on white); the bar/tint use the vivid one, which
+     carries no text. */
+  --flag: #c2410c;
+  --flag-vivid: #ea580c;
+  --flag-bg: rgba(234, 88, 12, 0.14);
+  --flag-border: #fb923c;
+  --flag-glow: 0 0 0 1px rgba(234, 88, 12, 0.55), 0 0 10px rgba(234, 88, 12, 0.28);
+
+  /* The character being sung right now: a solid pill, not just a tint, so it
+     is unmistakable at a glance (white on #0369a1 = 5.9:1). */
+  --karaoke-active-bg: #0369a1;
+  --karaoke-active-text: #ffffff;
+  --karaoke-active-ring: 0 0 0 2px rgba(3, 105, 161, 0.3);
+
+  --accent-faint: rgba(2, 132, 199, 0.07);
+  --accent-soft: rgba(2, 132, 199, 0.16);
+  --accent-glow: 0 0 12px rgba(2, 132, 199, 0.35);
+
+  --ok-border: rgba(4, 120, 87, 0.35);
+  --warn-border: rgba(180, 83, 9, 0.35);
+  --err-border: rgba(220, 38, 38, 0.35);
+  --accent-border: rgba(2, 132, 199, 0.35);
+
+  --wave: #a8b5c9;
+  --wave-progress: #0284c7;
+  --wave-cursor: #db2777;
+
+  --shadow: 0 10px 30px rgba(15, 23, 42, 0.12);
+
+  --radius: 10px;
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+  --bg: #0b1020;
+  --bg-elevated: #131a2e;
+  --bg-panel: #172039;
+  --bg-input: #0f1628;
+  --bg-hover: #1f2a47;
+  --bg-wave: #0a1020;
+  --bg-chip: #16203a;
+
+  --border: #26314f;
+  --border-strong: #35446b;
+
+  --text: #e6ecff;
+  --text-dim: #93a0c0;
+
+  --accent: #38bdf8;
+  --accent-strong: #0ea5e9;
+  --on-accent: #04121f;
+
+  --danger: #f87171;
+  --danger-border: #7f1d1d;
+  --warn: #fbbf24;
+  --ok: #34d399;
+
+  /* On the near-black panel an amber tint is invisible; use a saturated
+     orange that clears 4.5:1 against --bg-elevated and --bg-input. */
+  --flag: #ff8a3d;
+  --flag-vivid: #ff8a3d;
+  --flag-bg: rgba(255, 138, 61, 0.18);
+  --flag-border: #ff8a3d;
+  --flag-glow: 0 0 0 1px rgba(255, 138, 61, 0.6), 0 0 12px rgba(255, 138, 61, 0.35);
+
+  --karaoke-active-bg: #38bdf8;
+  --karaoke-active-text: #04121f;
+  --karaoke-active-ring: 0 0 0 2px rgba(56, 189, 248, 0.35);
+
+  --accent-faint: rgba(56, 189, 248, 0.06);
+  --accent-soft: rgba(56, 189, 248, 0.2);
+  --accent-glow: 0 0 12px rgba(56, 189, 248, 0.6);
+
+  --ok-border: rgba(52, 211, 153, 0.4);
+  --warn-border: rgba(251, 191, 36, 0.4);
+  --err-border: rgba(248, 113, 113, 0.4);
+  --accent-border: rgba(56, 189, 248, 0.4);
+
+  --wave: #4b5563;
+  --wave-progress: #38bdf8;
+  --wave-cursor: #f472b6;
+
+  --shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", "PingFang SC",
+    "Microsoft YaHei", sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  transition: background-color 150ms ease, color 150ms ease;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+button,
+select,
+input,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  background: var(--bg-panel);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  padding: 6px 12px;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+button:hover:not(:disabled) {
+  background: var(--bg-hover);
+  border-color: var(--accent);
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+button.primary {
+  background: var(--accent-strong);
+  border-color: var(--accent-strong);
+  color: var(--on-accent);
+  font-weight: 600;
+}
+
+button.primary:hover:not(:disabled) {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+button.danger {
+  border-color: var(--danger-border);
+  color: var(--danger);
+}
+
+button.ghost {
+  background: transparent;
+  border-color: transparent;
+}
+
+button.ghost:hover:not(:disabled) {
+  background: var(--accent-soft);
+}
+
+input[type="text"],
+input[type="search"],
+textarea,
+select {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 10px;
+  outline: none;
+  width: 100%;
+}
+
+input:focus,
+textarea:focus,
+select:focus {
+  border-color: var(--accent);
+}
+
+textarea {
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  line-height: 1.6;
+}
+
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+.app-shell {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 20px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elevated);
+  position: sticky;
+  top: 0;
+  z-index: 20;
+}
+
+.brand {
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  font-size: 16px;
+}
+
+.brand span {
+  color: var(--accent);
+}
+
+.topbar nav {
+  display: flex;
+  gap: 4px;
+}
+
+.topbar nav a {
+  padding: 4px 10px;
+  border-radius: 6px;
+  color: var(--text-dim);
+}
+
+.topbar nav a.active {
+  color: var(--text);
+  background: var(--bg-panel);
+}
+
+.topbar .spacer {
+  flex: 1;
+}
+
+.theme-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+.theme-toggle:hover:not(:disabled) {
+  color: var(--text);
+}
+
+.theme-toggle svg {
+  width: 16px;
+  height: 16px;
+  flex: none;
+}
+
+.container {
+  width: 100%;
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 20px;
+}
+
+.card {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+}
+
+.card + .card {
+  margin-top: 16px;
+}
+
+.card h2,
+.card h3 {
+  margin: 0 0 12px;
+  font-size: 15px;
+}
+
+.muted {
+  color: var(--text-dim);
+}
+
+.error-text {
+  color: var(--danger);
+}
+
+.warn-text {
+  color: var(--warn);
+}
+
+.ok-text {
+  color: var(--ok);
+}
+
+.row {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 160px;
+  flex: 1;
+}
+
+.field label {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  border: 1px solid var(--border-strong);
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.badge.ok {
+  border-color: var(--ok-border);
+  color: var(--ok);
+}
+
+.badge.warn {
+  border-color: var(--warn-border);
+  color: var(--warn);
+}
+
+.badge.err {
+  border-color: var(--err-border);
+  color: var(--danger);
+}
+
+.badge.info {
+  border-color: var(--accent-border);
+  color: var(--accent);
+}
+
+/* The review counter has to read as an alarm, not a hint. */
+.badge.flag {
+  border-color: var(--flag);
+  background: var(--flag);
+  color: #fff;
+  font-weight: 700;
+  box-shadow: var(--flag-glow);
+}
+
+:root[data-theme="dark"] .badge.flag {
+  color: #1a0b02;
+}
+
+.progress {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--bg-panel);
+  overflow: hidden;
+}
+
+.progress > div {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent-strong), var(--accent));
+  transition: width 300ms ease;
+}
+
+/* ---------- project list ---------- */
+
+.upload-zone {
+  border: 2px dashed var(--border-strong);
+  border-radius: var(--radius);
+  padding: 28px;
+  text-align: center;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.upload-zone.dragging {
+  border-color: var(--accent);
+  background: var(--accent-faint);
+  color: var(--text);
+}
+
+.project-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 14px;
+  margin-top: 16px;
+}
+
+.project-card {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  transition: border-color 120ms ease, transform 120ms ease;
+}
+
+.project-card:hover {
+  border-color: var(--border-strong);
+}
+
+.project-card .title {
+  font-weight: 600;
+  font-size: 15px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-card .actions {
+  display: flex;
+  gap: 6px;
+  margin-top: auto;
+  padding-top: 6px;
+}
+
+/* ---------- editor layout ---------- */
+
+.editor-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+@media (max-width: 1080px) {
+  .editor-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.waveform-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.waveform {
+  background: var(--bg-wave);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 6px;
+  min-height: 110px;
+}
+
+.transport {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.transport .rate {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.transport .rate select {
+  width: auto;
+}
+
+.time-readout {
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
+.markers {
+  position: relative;
+  height: 18px;
+  border-radius: 4px;
+  background: var(--bg-panel);
+  overflow: hidden;
+}
+
+.marker {
+  position: absolute;
+  top: 2px;
+  width: 3px;
+  height: 14px;
+  padding: 0;
+  border: none;
+  border-radius: 2px;
+  background: var(--border-strong);
+  transform: translateX(-50%);
+}
+
+.marker:hover {
+  background: var(--accent);
+}
+
+.marker.selected {
+  background: var(--flag-vivid);
+  width: 4px;
+  height: 16px;
+}
+
+.marker.selected.active {
+  background: var(--karaoke-active-bg);
+}
+
+.marker.active {
+  background: var(--accent);
+}
+
+.marker-playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--danger);
+}
+
+.karaoke-line {
+  min-height: 40px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: var(--bg-panel);
+  font-size: 18px;
+  line-height: 1.7;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0;
+}
+
+.karaoke-word {
+  color: var(--text-dim);
+  transition: color 100ms ease;
+}
+
+.karaoke-word.sung {
+  color: var(--text);
+}
+
+.karaoke-word.active {
+  color: var(--karaoke-active-text);
+  background: var(--karaoke-active-bg);
+  border-radius: 4px;
+  padding: 0 2px;
+  font-weight: 700;
+  box-shadow: var(--karaoke-active-ring);
+}
+
+/* ---------- align options ---------- */
+
+.align-options {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.align-option {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  cursor: pointer;
+  line-height: 1.5;
+}
+
+.align-option input {
+  margin-top: 3px;
+  flex: none;
+}
+
+.align-option > span {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.align-option b {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.align-option .small {
+  color: var(--text-dim);
+}
+
+/* ---------- timeline editor ---------- */
+
+.lyrics-candidates {
+  list-style: none;
+  margin: 0 0 10px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.lyrics-candidate {
+  width: 100%;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+}
+
+.lyrics-candidate:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--accent-faint);
+}
+
+.lyrics-candidate .title {
+  font-weight: 600;
+}
+
+.lyrics-candidate .preview {
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.timeline-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 62vh;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.line-row {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: var(--bg-input);
+  cursor: pointer;
+}
+
+.line-row.selected {
+  border-color: var(--accent);
+  background: var(--accent-faint);
+}
+
+/* The line being sung right now. Drawn as an outline so it composes with the
+   flagged row's box-shadow instead of replacing it. */
+.line-row.active {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* Flagged for a human listen: tinted row + thick left bar, visible while
+   scrolling past without selecting it. */
+.line-row.flagged {
+  background: var(--flag-bg);
+  border-color: var(--flag-border);
+  box-shadow: inset 5px 0 0 var(--flag-vivid);
+}
+
+.line-row.flagged .line-head .index {
+  color: var(--flag);
+  font-weight: 700;
+}
+
+.line-row.flagged .text {
+  color: var(--text);
+}
+
+.line-row.flagged.selected {
+  box-shadow: inset 5px 0 0 var(--flag-vivid), 0 0 0 2px var(--accent);
+}
+
+.line-head .line-note {
+  color: var(--text-dim);
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: help;
+}
+
+/* What the ASR heard on a flagged line, next to the lyric it was mapped to. */
+.heard-line {
+  margin-top: 4px;
+  padding-left: 32px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.run-notes {
+  margin: 0 0 10px;
+  padding-left: 18px;
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+/* ---------- API cache page ---------- */
+
+.cache-list {
+  list-style: none;
+  margin: 0 0 10px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.cache-item {
+  width: 100%;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+}
+
+.cache-item:hover {
+  border-color: var(--accent);
+}
+
+.cache-item.selected {
+  border-color: var(--accent);
+  background: var(--accent-faint);
+}
+
+.cache-item .title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cache-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 46vh;
+  overflow-y: auto;
+  margin-top: 10px;
+}
+
+/* The per-character table, at reading size rather than editor size. */
+.cache-words {
+  margin-top: 4px;
+  font-size: 15px;
+  line-height: 1.8;
+  color: var(--text-dim);
+}
+
+/* ------------------------------------------------------------------ */
+/* Debug page: one card per pipeline step.                             */
+/* ------------------------------------------------------------------ */
+
+.debug-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-bottom: 40px;
+}
+
+.debug-step {
+  margin: 0;
+}
+
+.debug-kv {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 4px 16px;
+  margin: 0 0 8px;
+  font-size: 13px;
+}
+
+.debug-kv div {
+  display: flex;
+  gap: 6px;
+  min-width: 0;
+}
+
+.debug-kv dt {
+  color: var(--text-dim);
+  flex: none;
+}
+
+.debug-kv dd {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.debug-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  margin-bottom: 8px;
+}
+
+.debug-table th,
+.debug-table td {
+  text-align: left;
+  padding: 3px 8px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+
+.debug-table th {
+  color: var(--text-dim);
+  font-weight: 600;
+}
+
+.debug-error-row {
+  background: var(--flag-bg, rgba(255, 150, 0, 0.08));
+}
+
+.debug-words {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.debug-json {
+  max-height: 420px;
+  overflow: auto;
+  padding: 8px;
+  border-radius: 6px;
+  background: var(--bg-chip);
+  font-size: 11px;
+  line-height: 1.45;
+  margin: 8px 0 0;
+}
+
+.debug-lines {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.debug-columns {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+@media (max-width: 720px) {
+  .debug-columns {
+    grid-template-columns: 1fr;
+  }
+}
+
+.line-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.line-head .index {
+  color: var(--text-dim);
+  font-size: 12px;
+  min-width: 24px;
+}
+
+.line-head .text {
+  /* A flagged line carries badges, a note and a reference hint; without a
+     basis the lyric itself would be the only item left to shrink to zero. */
+  flex: 1 1 220px;
+  min-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The lyrics source's own timing: a hint you can click to listen, never a
+   value that silently replaces the ASR timings. */
+.line-head .reference-time {
+  color: var(--text-dim);
+  padding: 0 6px !important;
+  border: 1px dashed var(--border-strong);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.line-head .reference-time:hover {
+  color: var(--text);
+}
+
+/* Inline lyric editing: the text itself becomes an input, so keep the row's
+   height steady while it is open. */
+.line-head .line-text-input {
+  flex: 1;
+  min-width: 0;
+  font-size: 14px;
+  padding: 2px 6px !important;
+}
+
+.line-head .edit-text {
+  opacity: 0;
+  padding: 0 6px !important;
+  line-height: 1.4;
+}
+
+.line-row:hover .line-head .edit-text,
+.line-row.selected .line-head .edit-text,
+.line-head .edit-text:focus-visible {
+  opacity: 1;
+}
+
+.time-input {
+  width: 92px !important;
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+  padding: 3px 6px !important;
+  text-align: right;
+}
+
+.word-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  margin-top: 6px;
+}
+
+.word-chip {
+  border-radius: 4px;
+  padding: 1px 5px;
+  background: var(--bg-chip);
+  border: 1px solid var(--border);
+  font-size: 13px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.word-chip.timed {
+  border-color: var(--accent-border);
+  color: var(--accent);
+}
+
+.word-chip.selected {
+  border-color: var(--flag);
+  color: var(--flag);
+  font-weight: 700;
+}
+
+/* The one character the keyboard stamps: the multi-selection can be a whole
+   run, so the anchor needs a mark of its own or Enter looks ambiguous. */
+.word-chip.selected.focus {
+  background: var(--flag-bg);
+}
+
+.toolbar button.flag-action {
+  border-color: var(--flag);
+  color: var(--flag);
+  font-weight: 700;
+}
+
+.toolbar button.flag-action:hover {
+  background: var(--flag-bg);
+}
+
+.word-chip.active {
+  background: var(--karaoke-active-bg);
+  border-color: var(--karaoke-active-bg);
+  color: var(--karaoke-active-text);
+}
+
+/* Timings the aligner never gave: interpolated between real neighbours. */
+.word-chip.interpolated {
+  border-style: dashed;
+  border-color: var(--border-strong);
+  color: var(--text-dim);
+}
+
+/* Single-character editing: the pencil only appears on the selected chip. */
+.word-chip .word-edit {
+  margin-left: 2px;
+  padding: 0 2px;
+  font-size: 11px;
+  line-height: 1;
+  border: none;
+  background: none;
+  color: inherit;
+  opacity: 0.7;
+}
+
+.word-chip .word-edit:hover {
+  opacity: 1;
+}
+
+.word-chip-input {
+  width: 3.5em;
+  padding: 1px 4px;
+  font-size: 13px;
+  font-family: inherit;
+  border: 1px solid var(--flag);
+  border-radius: 4px;
+  background: var(--bg-input, var(--bg-chip));
+  color: var(--text);
+}
+
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+/* ---------- per-line word slider ----------
+   The line drawn as a progress bar: the fill is the selected run of
+   characters, the two handles are its start and end. Sized for touch
+   (the handles are 14px but get a larger hit area via padding). */
+.word-slider {
+  margin-top: 8px;
+  padding: 6px 8px 2px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-panel);
+}
+
+.word-slider-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.word-slider-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.word-slider-times {
+  font-family: ui-monospace, monospace;
+  white-space: nowrap;
+  color: var(--text-dim);
+}
+
+.word-slider-bar {
+  position: relative;
+  height: 26px;
+  margin: 0 8px 8px;
+  touch-action: none;
+  cursor: default;
+}
+
+.word-slider-track {
+  position: absolute;
+  top: 11px;
+  left: 0;
+  right: 0;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--border-strong);
+}
+
+.word-slider-fill {
+  position: absolute;
+  top: 9px;
+  height: 8px;
+  border-radius: 4px;
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-border);
+  cursor: grab;
+}
+
+.word-slider-bar.dragging .word-slider-fill {
+  background: var(--accent-glow);
+}
+
+.word-slider-handle {
+  position: absolute;
+  top: 4px;
+  width: 14px;
+  height: 18px;
+  margin-left: -7px;
+  padding: 0;
+  border: 2px solid var(--accent-strong);
+  border-radius: 4px;
+  background: var(--bg-elevated);
+  cursor: ew-resize;
+  touch-action: none;
+}
+
+.word-slider-handle:hover,
+.word-slider-bar.dragging .word-slider-handle {
+  background: var(--accent);
+  border-color: var(--accent-strong);
+}
+
+.word-slider-handle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* Acting on the selection with buttons rather than by dragging. */
+.word-slider-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 6px 0 2px;
+  padding-left: 8px;
+}
+
+.word-slider-actions button {
+  padding: 2px 8px;
+  font-size: 12px;
+}
+
+/* Toggle buttons (跟随播放): the pressed state has to read as "on" at a
+   glance, so it uses the accent fill rather than a checkmark alone. */
+button.active-toggle {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--text);
+  font-weight: 600;
+}
+
+.toolbar .sep {
+  width: 1px;
+  height: 20px;
+  background: var(--border);
+}
+
+.kbd {
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  padding: 0 4px;
+  color: var(--text-dim);
+}
+
+.candidate {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px;
+  background: var(--bg-input);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.candidate.selected {
+  border-color: var(--accent);
+  background: var(--accent-faint);
+}
+
+.candidate .meta {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+
+.score {
+  font-size: 12px;
+  color: var(--accent);
+  font-family: ui-monospace, monospace;
+}
+
+.split {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+@media (max-width: 820px) {
+  .split {
+    grid-template-columns: 1fr;
+  }
+}
+
+.tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 12px;
+}
+
+.tabs button {
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  padding: 6px 12px;
+  color: var(--text-dim);
+}
+
+.tabs button.active {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}
+
+.small {
+  font-size: 12px;
+}
+
+.row .spacer {
+  flex: 1;
+}
+
+.toast {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  padding: 10px 14px;
+  max-width: 360px;
+  z-index: 50;
+  box-shadow: var(--shadow);
+}
+
+.toast.error {
+  border-color: var(--danger-border);
+}
+
+.empty-state {
+  text-align: center;
+  color: var(--text-dim);
+  padding: 40px 20px;
+}
+
+.dirty-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--warn);
+  display: inline-block;
+}

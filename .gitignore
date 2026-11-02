@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Runtime data (SQLite database + uploaded audio)
+data/
+*.db
+*.db-journal
+*.db-wal
+
+# Node / frontend
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Local config
+.env
+.env.local
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+test/
+CLAUDE.md
