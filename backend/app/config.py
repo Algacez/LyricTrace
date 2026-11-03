@@ -36,6 +36,30 @@ def _int(name: str, default: int) -> int:
         return default
 
 
+def _char_table(name: str, defaults: dict[str, int], fallback: int) -> dict[str, int]:
+    """A per-language character limit: ``Chinese=12,Japanese=18``.
+
+    Keys are matched case-insensitively; an unknown key is ignored rather than
+    trusted, and ``default`` overrides the fallback for every unlisted language.
+    """
+    table = {key.lower(): value for key, value in defaults.items()}
+    table["default"] = fallback
+    raw = os.environ.get(name)
+    if raw is None:
+        return table
+    for item in raw.split(","):
+        key, _, value = item.partition("=")
+        key = key.strip().lower()
+        try:
+            number = int(value.strip())
+        except ValueError:
+            continue
+        if not key or number < 1:
+            continue
+        table[key] = number
+    return table
+
+
 class Settings:
     """Runtime settings. Instantiated once at import time."""
 
@@ -69,10 +93,18 @@ class Settings:
         # Pipeline behaviour
         self.auto_search = _bool("LYRICTRACE_AUTO_SEARCH", True)
         self.auto_select_threshold = _float("LYRICTRACE_AUTO_SELECT_THRESHOLD", 0.6)
+        # The per-project override (``fetch_lyrics``) decides whether a run that
+        # has no pasted lyrics asks NetEase / LRCLIB / LrcApi for them. This is
+        # the global default for that flag, on by default (see ``oneshot`` and
+        # ``pipeline``): a run with no lyrics fetches them unless the project has
+        # switched the lookup off.
+        self.fetch_lyrics = _bool("LYRICTRACE_FETCH_LYRICS", True)
         # When the entry the lyrics came from has no 逐字 data, look for it in
-        # another edition of the same song (the live cut usually has one). On by
-        # default; a project can switch it off, and so can this global default.
-        self.word_sync_search = _bool("LYRICTRACE_WORD_SYNC_SEARCH", True)
+        # another edition of the same song (the live cut usually has one). Off
+        # by default: it is the most expensive fallback (a second chain of
+        # searches) and it only pays off for songs whose studio entry has no
+        # ``yrc``. A project can switch it on, and so can this global default.
+        self.word_sync_search = _bool("LYRICTRACE_WORD_SYNC_SEARCH", False)
         self.metadata_extractor = os.environ.get("LYRICTRACE_METADATA_EXTRACTOR", "llm")
         self.llm_base_url = os.environ.get("LYRICTRACE_LLM_BASE_URL", "").rstrip("/")
         self.llm_api_key = os.environ.get("LYRICTRACE_LLM_API_KEY", "")
@@ -118,24 +150,52 @@ class Settings:
         # end and merge each unit's span (``LYRICTRACE_LLM_MERGE=true`` makes
         # that the default; the per-project field still wins).
         self.llm_merge = _bool("LYRICTRACE_LLM_MERGE", False)
+        # Whether a run with no lyrics asks the LLM where the lines break. On:
+        # the recogniser's transcript is split into lyric-like lines at phrase
+        # boundaries instead of only at pauses, which is what makes a run with
+        # no lyrics readable. It degrades to the pause-based split when the LLM
+        # is unavailable or its answer does not reproduce the transcript, so
+        # turning it on never costs a run. A project can switch it off.
+        self.line_split = _bool("LYRICTRACE_LINE_SPLIT", True)
+        # How long a line may get, per sung language, when there are no lyrics
+        # to take the breaks from. Chinese is dense — 12 characters is already a
+        # sung phrase — while Japanese kana and Latin words need more room, so
+        # the limit is per language rather than one global number. Keys are the
+        # recogniser's own language names (see ``language.SUPPORTED``); anything
+        # unlisted falls back to ``default``.
+        self.line_split_max_chars = _char_table(
+            "LYRICTRACE_LINE_SPLIT_MAX_CHARS",
+            {"Chinese": 12, "Cantonese": 12, "Japanese": 18, "Korean": 18},
+            24,
+        )
 
         # Cache limits. Everything below is a *cache*: the one-shot jobs keep
-        # their upload and ASR slices after the answer is read, a project keeps
-        # its work dir, and an aborted upload leaves a staging file. Nothing
-        # deleted them before, so the disk grew by about one song per run
+        # their ASR slices after the answer is read, a project keeps its work
+        # dir, and an aborted upload leaves a staging file. Nothing deleted
+        # them before, so the disk grew by about one song per run
         # (``services/housekeeping`` sweeps them on a timer).
-        # The one-shot jobs kept for the web UI (``/api/cache/jobs``): only the
-        # newest few requests keep their upload *and* their finished result.
-        # Everything older is swept — a cache of results is only useful while a
-        # person can still recognise which request it came from.
-        self.oneshot_cache_jobs = _int("LYRICTRACE_ONESHOT_CACHE_JOBS", 5)
+        #
+        # A one-shot job's *record* — ``job.json`` with the request and its
+        # finished 逐字 result — is history, not a cache: it is never swept, so
+        # every request can be polled again and the 「API 缓存」 page can replay
+        # it. What the sweep does delete is the bulky stuff nothing reads a
+        # second time: ``work/`` (below) and, once a job is older than
+        # ``oneshot_max_age_hours``, the uploaded ``input.<ext>``.
+        # ``LYRICTRACE_ONESHOT_MAX_JOBS`` / ``_MAX_MB`` no longer delete jobs;
+        # they are still reported by ``GET /api/storage`` and are the point past
+        # which the *source files* stop being kept.
+        legacy_jobs = _int("LYRICTRACE_ONESHOT_CACHE_JOBS", 0)
+        self.oneshot_max_jobs = _int("LYRICTRACE_ONESHOT_MAX_JOBS", legacy_jobs)
         self.oneshot_max_mb = _int("LYRICTRACE_ONESHOT_MAX_MB", 2000)
         self.oneshot_max_age_hours = _int("LYRICTRACE_ONESHOT_MAX_AGE_HOURS", 24)
-        # A finished one-shot job keeps ``input`` + ``job.json`` (the result the
-        # caller polls). Its ``work/`` dir — the 20 s ASR slices, ~100 MB for a
-        # four-minute song — is dropped as soon as the job ends: nothing reads
-        # it again. Set to true to keep it for manual inspection.
+        # A finished one-shot job keeps ``input.<ext>`` + ``job.json``. Its
+        # ``work/`` dir — the 20 s ASR slices, ~100 MB for a four-minute song —
+        # is dropped as soon as the job ends: nothing reads it again. Set to
+        # true to keep it for manual inspection.
         self.oneshot_keep_work = _bool("LYRICTRACE_ONESHOT_KEEP_WORK", False)
+        # Keep the uploaded source of every finished job, however old. Off
+        # drops it past ``oneshot_max_age_hours`` (the result stays).
+        self.oneshot_keep_input = _bool("LYRICTRACE_ONESHOT_KEEP_INPUT", False)
         self.work_max_mb = _int("LYRICTRACE_WORK_MAX_MB", 2000)
         self.upload_stale_minutes = _int("LYRICTRACE_UPLOAD_STALE_MINUTES", 60)
         # A project's work dir (prepared vocals + every per-line slice) is

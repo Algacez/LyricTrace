@@ -21,7 +21,8 @@ export interface WaveformHandle {
 }
 
 export interface WaveformProps {
-  audioUrl: string;
+  /** The file to draw. ``null`` when the record's upload has been swept. */
+  audioUrl: string | null;
   timeline: Timeline | null;
   selectedLine: number | null;
   onSeekLine?: (index: number) => void;
@@ -46,6 +47,19 @@ export const Waveform = forwardRef<WaveformHandle, WaveformProps>(function Wavef
   const [playing, setPlaying] = useState(false);
   const [rate, setRate] = useState(1);
   const [error, setError] = useState<string | null>(null);
+
+  // No audio (a job whose upload the sweep already dropped) still shows the
+  // timeline, the markers and the editor: a character can be stamped from the
+  // keyboard and the times read off the line list. Only playback is gone.
+  if (!audioUrl) {
+    return (
+      <div className="waveform-panel">
+        <p className="muted small" style={{ margin: 0 }}>
+          这条记录的音频已经不在了，逐字结果仍可查看和修正。
+        </p>
+      </div>
+    );
+  }
 
   useImperativeHandle(
     ref,

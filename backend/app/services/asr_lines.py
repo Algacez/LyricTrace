@@ -65,9 +65,16 @@ def group_words(
     return groups
 
 
-def lines_from_words(words: list[Word]) -> list[Line]:
+def lines_from_groups(groups: list[list[Word]]) -> list[Line]:
+    """``lines_from_words`` for a grouping that was decided some other way.
+
+    The recogniser's pauses are not always where a sung line ends, so the
+    grouping can come from the LLM instead (see ``line_split``). The text and
+    every time are still the recogniser's: this only turns a grouping into
+    lines, exactly as ``lines_from_words`` does for the pause-based one.
+    """
     lines: list[Line] = []
-    for group in group_words(words):
+    for group in groups:
         text = SPACE_RE.sub(" ", "".join(word.text for word in group)).strip()
         if not text:
             continue
@@ -81,7 +88,11 @@ def lines_from_words(words: list[Word]) -> list[Line]:
                 end=timed[-1].end,
                 words=timed,
                 source="asr",
-                note="未提供歌词，这一行是按识别到的停顿自动断句的",
+                note="未提供歌词，这一行来自识别文本",
             )
         )
     return lines
+
+
+def lines_from_words(words: list[Word]) -> list[Line]:
+    return lines_from_groups(group_words(words))

@@ -8,9 +8,10 @@
 The job runs in the background because a four-minute song takes minutes of GPU
 time. Poll the job until ``status`` is ``succeeded`` or ``failed``.
 
-The newest ``LYRICTRACE_ONESHOT_CACHE_JOBS`` (5) finished jobs are kept with
-their source *and* their result, so a result can be listened to again in the web
-UI without re-running anything; ``services/housekeeping`` sweeps the rest.
+Job records are history: they are never swept, so every request can be polled
+again and the web UI lists them all. ``services/housekeeping`` drops only what
+nobody reads twice — the ``work/`` slices, and the uploaded source once the job
+is older than ``LYRICTRACE_ONESHOT_MAX_AGE_HOURS`` (the result stays).
 """
 
 from __future__ import annotations
@@ -19,12 +20,13 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 
 from .. import db
-from ..audio import guess_mime, is_supported_audio
+from ..audio import guess_mime, is_supported_audio, remux_audio
 from ..config import settings
+from ..schemas import JobDelete, OneShotResult
 from ..services.oneshot import TERMINAL, jobs
 
 router = APIRouter(prefix="/api", tags=["align"])
@@ -38,7 +40,7 @@ async def create_alignment_job(
     separate: bool = Form(default=True, description="Run vocal separation before ASR"),
     word_sync_search: bool | None = Form(
         default=None,
-        description="Look for 逐字 lyrics in other editions of the song (default: server setting)",
+        description="Look for 逐字 lyrics in other editions of the song (default: off)",
     ),
     detect_extras: bool = Form(
         default=False,
@@ -47,6 +49,18 @@ async def create_alignment_job(
     llm_merge: bool = Form(
         default=False,
         description="Group the per-character timeline into words with the LLM (按语意合并成词)",
+    ),
+    fetch_lyrics: bool = Form(
+        default=True,
+        description="Look the song up in NetEase / LRCLIB / LrcApi when no lyrics were pasted (默认开；关掉则直接 ASR 或用手动粘贴的歌词，不自动去抓)",
+    ),
+    line_split: bool = Form(
+        default=True,
+        description="When no lyrics are given, ask the LLM where the sung lines break (默认开；只决定断行，不改动任何字符，对不上就退回按停顿断句)",
+    ),
+    line_split_max_chars: int | None = Form(
+        default=None,
+        description="Ceiling on the characters per line when there are no lyrics; empty means per language (中文 12、日语 18、其余 24)",
     ),
 ) -> dict[str, Any]:
     filename = Path(file.filename or "audio").name
@@ -81,6 +95,12 @@ async def create_alignment_job(
         staging.unlink(missing_ok=True)
         raise HTTPException(status_code=400, detail="Uploaded file is empty.")
 
+    # Same rewrite as the project upload: the job's audio is replayed from here
+    # (``GET /api/align/{job_id}/audio``), and a browser refuses a container with
+    # a malformed PICTURE block no matter how well ffmpeg reads it. The source is
+    # left as uploaded if the rewrite fails — the ASR can still read that.
+    remux_audio(staging)
+
     try:
         job = jobs.create(
             audio_path=staging,
@@ -98,6 +118,9 @@ async def create_alignment_job(
             word_sync_search=word_sync_search,
             detect_extras=detect_extras,
             llm_merge=llm_merge,
+            fetch_lyrics=fetch_lyrics,
+            line_split=line_split,
+            line_split_max_chars=line_split_max_chars,
         )
     except Exception:
         staging.unlink(missing_ok=True)
@@ -106,14 +129,30 @@ async def create_alignment_job(
 
 
 @router.get("/align")
-def list_alignment_jobs() -> dict[str, Any]:
-    """The cached jobs — what the web UI lists, newest first.
+def list_alignment_jobs(
+    limit: int = Query(default=50, ge=1, le=500, description="How many jobs to return"),
+    offset: int = Query(default=0, ge=0, description="Skip this many of the newest jobs"),
+) -> dict[str, Any]:
+    """A page of the history, newest first — what the web UI's cache page reads.
 
-    Only the newest ``oneshot_cache_jobs`` finished jobs survive the sweep, so
-    every entry here has both its source file and its result on disk.
+    Job records are never swept (only their ``work/`` slices and, past
+    ``oneshot_max_age_hours``, their uploaded source), so an entry here always
+    has its result; ``has_audio`` says whether the source is still playable.
+    ``total`` counts everything, so the UI can page through all of it.
     """
-    items = [_public(job) for job in jobs.recent()]
-    return {"items": items, "total": len(items), "max_jobs": settings.oneshot_cache_jobs}
+    total = len(jobs.recent())
+    page = jobs.recent(limit=limit, offset=offset)
+    items = [_public(job, with_audio=jobs.input_path(job["job_id"]) is not None) for job in page]
+    return {
+        "items": items,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        # No longer a deletion rule: how long a finished job keeps its uploaded
+        # source, and the count/size limits the UI quotes as reference.
+        "max_age_hours": settings.oneshot_max_age_hours,
+        "max_jobs": settings.oneshot_max_jobs,
+    }
 
 
 @router.get("/align/{job_id}")
@@ -151,8 +190,53 @@ def delete_alignment_job(job_id: str) -> None:
     shutil.rmtree(jobs.job_dir(job_id), ignore_errors=True)
 
 
-def _public(job: dict[str, Any]) -> dict[str, Any]:
-    """Job record minus the absolute paths that mean nothing to a caller."""
+@router.post("/align/delete", status_code=204)
+def delete_alignment_jobs(payload: JobDelete) -> None:
+    """Delete several cached jobs at once, with their audio and results.
+
+    The whole job directory goes — that is the record (``job.json``) as well as
+    the uploaded source, which is what "删除所有相关文件" means here. A job that
+    is still queued or running is refused (409): its worker is writing into that
+    directory right now.
+    """
+    ids = list(dict.fromkeys(payload.ids))
+    if not ids:
+        return
+    running: list[str] = []
+    for job_id in ids:
+        job = jobs.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+        if job["status"] not in TERMINAL:
+            running.append(job_id)
+    if running:
+        raise HTTPException(status_code=409, detail="Job is still running")
+    for job_id in ids:
+        shutil.rmtree(jobs.job_dir(job_id), ignore_errors=True)
+
+
+@router.put("/align/{job_id}/result")
+def update_alignment_result(job_id: str, payload: OneShotResult) -> dict[str, Any]:
+    """Write a hand-edited result back into a cached job.
+
+    The web UI's cache page edits a cached result with the same editor the
+    project page uses (per-character times and all), so the correction has to
+    survive a reload. Only ``result`` is replaced: what the request asked for
+    stays as it was.
+    """
+    updated = jobs.update_result(job_id, payload.model_dump())
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return _public(updated)
+
+
+def _public(job: dict[str, Any], *, with_audio: bool = True) -> dict[str, Any]:
+    """Job record minus the absolute paths that mean nothing to a caller.
+
+    ``with_audio`` says whether the uploaded source is still on disk: the sweep
+    drops it once a job is older than ``oneshot_max_age_hours``, and a job
+    without it still lists and still polls — only playback is gone.
+    """
     return {
         "job_id": job["job_id"],
         "status": job["status"],
@@ -167,4 +251,11 @@ def _public(job: dict[str, Any]) -> dict[str, Any]:
         "filename": jobs.source_name(job),
         "language": job.get("language"),
         "result": job.get("result"),
+        "with_audio": with_audio,
+        # What this request asked of the line splitter; jobs from before these
+        # fields existed simply look like the defaults.
+        "line_split": bool(job.get("line_split", True)),
+        "line_split_max_chars": job.get("line_split_max_chars"),
+        # Set when a correction was written back through PUT /result.
+        "edited_at": job.get("edited_at"),
     }

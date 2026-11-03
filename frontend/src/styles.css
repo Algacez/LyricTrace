@@ -459,6 +459,29 @@ textarea {
   border-color: var(--border-strong);
 }
 
+/* Ticked for batch delete. */
+.project-card.selected {
+  border-color: var(--accent);
+  background: var(--accent-faint);
+}
+
+.project-card .head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.project-card .head .title {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.project-card .pick {
+  flex: 0 0 auto;
+  margin: 0;
+  cursor: pointer;
+}
+
 .project-card .title {
   font-weight: 600;
   font-size: 15px;
@@ -769,6 +792,35 @@ textarea {
   gap: 6px;
 }
 
+/* One cached job: a tick box, the entry itself, and a one-off delete. */
+.cache-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.cache-check {
+  flex: 0 0 auto;
+  margin: 0 0 0 2px;
+  cursor: pointer;
+}
+
+.cache-delete {
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  line-height: 1;
+  color: var(--text-dim);
+  background: transparent;
+  border: 1px solid transparent;
+}
+
+.cache-delete:hover {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
 .cache-item {
   width: 100%;
   text-align: left;
@@ -797,23 +849,6 @@ textarea {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.cache-lines {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  max-height: 46vh;
-  overflow-y: auto;
-  margin-top: 10px;
-}
-
-/* The per-character table, at reading size rather than editor size. */
-.cache-words {
-  margin-top: 4px;
-  font-size: 15px;
-  line-height: 1.8;
-  color: var(--text-dim);
 }
 
 /* ------------------------------------------------------------------ */

@@ -8,6 +8,7 @@ export.
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -16,7 +17,7 @@ from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, PlainTextResponse, Response
 
 from .. import db
-from ..audio import guess_mime, is_supported_audio, probe_audio
+from ..audio import guess_mime, is_supported_audio, probe_audio, remux_audio
 from ..config import settings
 from ..schemas import (
     AlignRequest,
@@ -25,6 +26,7 @@ from ..schemas import (
     LyricsSearchResponse,
     LyricsSelectRequest,
     LyricsUpdate,
+    ProjectDelete,
     ProjectList,
     ProjectOut,
     ProjectUpdate,
@@ -70,9 +72,9 @@ def _asr_aligns(project: dict[str, Any]) -> bool:
 
 
 def _word_sync_searches(project: dict[str, Any]) -> bool:
-    """The project's other-edition 逐字 search setting; absent means on."""
+    """The project's other-edition 逐字 search setting; absent means off."""
     value = project.get("word_sync_search")
-    return True if value is None else bool(value)
+    return False if value is None else bool(value)
 
 
 def _searching_word_sync(updates: dict[str, Any], project: dict[str, Any]) -> bool:
@@ -118,7 +120,17 @@ async def create_project(file: UploadFile = File(...)) -> ProjectOut:
             detail=f"Unsupported audio type '{Path(filename).suffix or 'unknown'}'. "
             "Supported: mp3, flac, wav, m4a, aac, ogg, opus, wma, aiff, webm.",
         )
+    return await _store_upload(file, filename)
 
+
+async def _store_upload(file: UploadFile, filename: str) -> ProjectOut:
+    """Write the upload to disk, make it browser-playable, and queue its pipeline.
+
+    The rewrite comes after the tags are read: ``remux_audio`` keeps the tags
+    but drops the embedded cover art, and the pipeline reads the file's metadata
+    again on disk — either order works for the tags, and only this one leaves a
+    file that plays in the browser.
+    """
     project_id = db.new_id("prj_")
     stored_name = f"{project_id}{Path(filename).suffix.lower()}"
     destination = settings.audio_dir / stored_name
@@ -146,16 +158,19 @@ async def create_project(file: UploadFile = File(...)) -> ProjectOut:
         destination.unlink(missing_ok=True)
         raise HTTPException(status_code=400, detail="Uploaded file is empty.")
 
+    # Tags first, then the rewrite that keeps only the audio (see the docstring).
     info = probe_audio(destination)
+    remux_audio(destination)
+    size = destination.stat().st_size
     timestamp = db.now_iso()
     with db.connect() as conn:
         conn.execute(
             "INSERT INTO projects (id, title, artist, album, duration, audio_filename, audio_path, "
             "audio_size, audio_mime, original_filename, metadata_source, metadata_json, status, "
             "progress, separate_vocals, asr_align, hfa_timing, hfa_chars, detect_extras, llm_merge, "
-            "word_sync_search, created_at, updated_at) "
+            "word_sync_search, fetch_lyrics, line_split, created_at, updated_at) "
             "VALUES (?, '', '', '', "
-            "?, ?, ?, ?, ?, ?, 'pending', '{}', 'queued', 0, 1, 0, 0, 0, 0, 0, ?, ?, ?)",
+            "?, ?, ?, ?, ?, ?, 'pending', '{}', 'queued', 0, 1, 0, 0, 0, 0, 0, ?, ?, ?, ?, ?)",
             (
                 project_id,
                 info.duration,
@@ -165,6 +180,8 @@ async def create_project(file: UploadFile = File(...)) -> ProjectOut:
                 info.mime or guess_mime(filename),
                 filename,
                 int(settings.word_sync_search),
+                int(settings.fetch_lyrics),
+                int(settings.line_split),
                 timestamp,
                 timestamp,
             ),
@@ -244,8 +261,56 @@ def update_project(project_id: str, payload: ProjectUpdate) -> ProjectOut:
             # Switching it off drops a payload found in another edition; with
             # the search off nothing would look for a replacement.
             updates.update(_word_sync_fields(project, updates["word_sync_search"]))
+        if "fetch_lyrics" in updates and updates["fetch_lyrics"] is not None:
+            # Only decides whether the *next* run asks the sources when no lyrics
+            # were pasted; nothing cached depends on it, so the ASR cache stays.
+            updates["fetch_lyrics"] = int(bool(updates["fetch_lyrics"]))
+        if "line_split" in updates and updates["line_split"] is not None:
+            # Only decides how a run *without* lyrics groups the transcript; the
+            # cached word stream is about this audio either way.
+            updates["line_split"] = int(bool(updates["line_split"]))
+        if updates.get("line_split_max_chars") is not None:
+            updates["line_split_max_chars"] = int(updates["line_split_max_chars"])
         db.update_project(conn, project_id, **updates)
         return serialize_project(_get_project_or_404(conn, project_id))
+
+
+def _drop_project_files(project: dict[str, Any]) -> None:
+    """Everything a project owns on disk: its audio and its ``work/`` dir.
+
+    The DB rows (tasks / candidates / debug steps) cascade away with the project
+    row, since every one of them carries ``ON DELETE CASCADE`` and
+    ``db.connect`` turns foreign keys on.
+    """
+    (settings.audio_dir / project["audio_path"]).unlink(missing_ok=True)
+    work_dir = settings.data_dir / "work" / project["id"]
+    if work_dir.exists():
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+
+@router.post("/projects/delete", status_code=204)
+def delete_projects(payload: ProjectDelete) -> Response:
+    """Delete several projects at once, with everything they own.
+
+    A batch is refused outright (409) if any of them is queued or processing:
+    a worker is writing into that project's ``work/`` right now, and deleting
+    under it would leave the run to fail on files that no longer exist.
+    """
+    ids = list(dict.fromkeys(payload.ids))
+    if not ids:
+        return Response(status_code=204)
+    with db.connect() as conn:
+        rows = []
+        for project_id in ids:
+            project = _get_project_or_404(conn, project_id)
+            if project["status"] in {"queued", "processing"}:
+                raise HTTPException(status_code=409, detail=f"项目 {project_id} 正在处理中，不能删除。")
+            rows.append(project)
+        for project in rows:
+            conn.execute("DELETE FROM projects WHERE id = ?", (project["id"],))
+    for project in rows:
+        _drop_project_files(project)
+    return Response(status_code=204)
 
 
 @router.delete("/projects/{project_id}", status_code=204)
@@ -253,12 +318,7 @@ def delete_project(project_id: str) -> Response:
     with db.connect() as conn:
         project = _get_project_or_404(conn, project_id)
         conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
-    (settings.audio_dir / project["audio_path"]).unlink(missing_ok=True)
-    work_dir = settings.data_dir / "work" / project_id
-    if work_dir.exists():
-        import shutil
-
-        shutil.rmtree(work_dir, ignore_errors=True)
+    _drop_project_files(project)
     return Response(status_code=204)
 
 
@@ -292,11 +352,21 @@ def get_task(task_id: str) -> TaskOut:
 
 
 @router.get("/projects/{project_id}/tasks", response_model=list[TaskOut])
-def list_project_tasks(project_id: str) -> list[TaskOut]:
+def list_project_tasks(
+    project_id: str,
+    limit: int = Query(default=20, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+) -> list[TaskOut]:
+    """This project's tasks, newest first — a page of them, newest first.
+
+    A run is followed by polling the newest entry, so a caller that only needs
+    that one asks for a small page rather than the project's whole history.
+    """
     with db.connect() as conn:
         _get_project_or_404(conn, project_id)
         rows = conn.execute(
-            "SELECT * FROM tasks WHERE project_id = ? ORDER BY created_at DESC", (project_id,)
+            "SELECT * FROM tasks WHERE project_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            (project_id, limit, offset),
         ).fetchall()
     return [TaskOut(**dict(row)) for row in rows]
 
@@ -478,6 +548,12 @@ def request_alignment(project_id: str, payload: AlignRequest | None = None) -> T
             db.update_project(conn, project_id, hfa_timing=int(payload.hfa_timing))
         if payload.word_sync_search is not None:
             db.update_project(conn, project_id, **_word_sync_fields(project, payload.word_sync_search))
+        if payload.fetch_lyrics is not None:
+            db.update_project(conn, project_id, fetch_lyrics=int(payload.fetch_lyrics))
+        if payload.line_split is not None:
+            db.update_project(conn, project_id, line_split=int(payload.line_split))
+        if payload.line_split_max_chars is not None:
+            db.update_project(conn, project_id, line_split_max_chars=int(payload.line_split_max_chars))
         db.update_project(conn, project_id, status="queued", error=None, progress=0)
         task = _create_task(conn, project_id, TASK_ALIGN)
     return TaskOut(**task)

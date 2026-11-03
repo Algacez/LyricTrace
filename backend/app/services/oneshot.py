@@ -26,7 +26,9 @@ from ..config import settings
 from ..schemas import Line, Timeline, Word
 from . import char_align, lyrics_fetch, word_stream, word_sync
 from . import llm_merge as semantic_merge
-from .asr_lines import lines_from_words
+from .line_split import describe as describe_line_limit
+from .line_split import split_lines as split_lines_llm
+from .asr_lines import LINE_GAP_SEC, group_words, lines_from_groups
 from .asr_repair import (
     prepared_audio,
     repair_gaps,
@@ -87,6 +89,9 @@ class OneShotJobs:
         word_sync_search: bool | None = None,
         detect_extras: bool = False,
         llm_merge: bool = False,
+        fetch_lyrics: bool = True,
+        line_split: bool = True,
+        line_split_max_chars: int | None = None,
     ) -> dict[str, Any]:
         job_id = db.new_id("job_")
         directory = self.job_dir(job_id)
@@ -110,6 +115,10 @@ class OneShotJobs:
             # it, and the audio endpoint serves ``input.<ext>`` under it.
             "filename": filename or audio_path.name,
             "input": stored.name,
+            # What this request asked for, so the cache list can say why the
+            # lines look the way they do.
+            "line_split": bool(line_split),
+            "line_split_max_chars": line_split_max_chars,
         }
         self._write(job)
         self._executor.submit(
@@ -123,6 +132,9 @@ class OneShotJobs:
             settings.word_sync_search if word_sync_search is None else bool(word_sync_search),
             bool(detect_extras),
             bool(llm_merge),
+            bool(fetch_lyrics),
+            bool(line_split),
+            line_split_max_chars,
         )
         return job
 
@@ -135,27 +147,35 @@ class OneShotJobs:
         except json.JSONDecodeError:
             return None
 
-    def recent(self) -> list[dict[str, Any]]:
-        """Every job on disk, newest first.
+    def recent(self, *, limit: int | None = None, offset: int = 0) -> list[dict[str, Any]]:
+        """A page of the history, newest first — the whole list when no limit.
 
-        This is the cache the web UI shows: the sweep keeps the newest
-        ``oneshot_cache_jobs`` finished jobs (source + result), so whatever is
-        here is what can still be replayed without re-running anything.
+        This is the history the web UI shows: job records are never swept, so
+        everything ever requested is listed here. A job whose uploaded source
+        was dropped (older than ``oneshot_max_age_hours``) still lists and
+        still polls — only ``/api/align/{job_id}/audio`` answers 404 for it.
+
+        ``offset`` counts from the newest job, so a page is stable even while
+        new jobs arrive. The count of everything (for the UI's "共 N 次") is
+        ``len(self.recent())``.
         """
-        if not self.root.exists():
-            return []
         found: list[dict[str, Any]] = []
-        for directory in self.root.iterdir():
-            if not directory.is_dir() or directory.name.startswith("_"):
-                continue
-            job = self.get(directory.name)
-            if job is None:
-                continue
-            job.pop("_mtime", None)
-            found.append(job)
+        if self.root.exists():
+            for directory in self.root.iterdir():
+                if not directory.is_dir() or directory.name.startswith("_"):
+                    continue
+                job = self.get(directory.name)
+                if job is None:
+                    continue
+                job.pop("_mtime", None)
+                found.append(job)
         found.sort(
             key=lambda job: (str(job.get("created_at") or ""), job.get("job_id") or ""), reverse=True
         )
+        if offset:
+            found = found[offset:]
+        if limit is not None:
+            found = found[:limit]
         return found
 
     def input_path(self, job_id: str) -> Path | None:
@@ -179,6 +199,32 @@ class OneShotJobs:
             return name
         path = self.input_path(job["job_id"])
         return path.name if path is not None else None
+
+    def update_result(self, job_id: str, result: dict[str, Any]) -> dict[str, Any] | None:
+        """Replace a finished job's result with a hand-edited one.
+
+        This is the one-shot twin of ``PUT /api/projects/{id}/timeline``: the
+        job record is the only place a cached result lives, so a correction
+        made in the browser has to be written back here or it is lost on the
+        next reload. Only the result is touched — the request that produced it
+        (filename, language, the line-split settings) stays as it was, because
+        that is the record of what was asked.
+        """
+        job = self.get(job_id)
+        if job is None or job.get("status") not in TERMINAL:
+            return None
+        # A failed run has no answer to correct: writing one in would present a
+        # result the recogniser never produced. Only a succeeded job is editable.
+        if job.get("status") != JOB_SUCCEEDED:
+            return None
+        lines = result.get("lines") or []
+        words = result.get("words") or []
+        return self._update(
+            job_id,
+            result={**result, "lines": lines, "words": words},
+            edited_at=db.now_iso(),
+            message=f"已手工修正：{len(lines)} 行，{len(words)} 个字",
+        )
 
     def _write(self, job: dict[str, Any]) -> None:
         path = self._record_path(job["job_id"])
@@ -207,6 +253,9 @@ class OneShotJobs:
         word_sync_search: bool,
         detect_extras: bool = False,
         llm_merge: bool = False,
+        fetch_lyrics: bool = True,
+        line_split: bool = True,
+        line_split_max_chars: int | None = None,
     ) -> None:
         self._update(job_id, status=JOB_RUNNING, stage="start", progress=0.02, message="开始处理")
 
@@ -230,6 +279,7 @@ class OneShotJobs:
                 # The running time decides whether a same-titled entry by
                 # another singer is this cover or a different recording.
                 duration=probe_audio(audio_path).duration,
+                fetch_lyrics=fetch_lyrics,
             )
             language = self._resolve_language(job_id, language, filename, lyrics, notes)
             # Persist what the run settled on: the request may have said
@@ -265,6 +315,8 @@ class OneShotJobs:
                 retime=self._retimer(work_dir, audio_path, language, on_progress, notes),
                 detect_extras=detect_extras,
                 llm_merge=llm_merge,
+                line_split=line_split,
+                line_split_max_chars=line_split_max_chars,
             )
             self._update(
                 job_id,
@@ -305,16 +357,25 @@ class OneShotJobs:
         lyrics: str,
         filename: str,
         notes: list[str],
-        word_sync_search: bool = True,
+        word_sync_search: bool = False,
         duration: float | None = None,
+        fetch_lyrics: bool = True,
     ) -> tuple[str, str, list[Line]]:
         """Fetch the original lyrics from the source chain when the caller did not send any.
 
         Returns ``(lyrics, synced, word_sync_lines)``: the synced LRC is the
         API's own timeline, kept only as a positional hint for the aligner. The
         word-level lines are used only if they agree with this audio.
+
+        ``fetch_lyrics`` is the request's own switch (default on). When it is off
+        the run never asks the sources — it aligns the ASR transcript (or the
+        lyrics the caller did paste) and nothing is fetched behind the caller's
+        back. Note the two are independent: a run can paste lyrics *and* turn the
+        auto-fetch off, or send no lyrics *and* let the run fetch them.
         """
-        if lyrics.strip() or not settings.auto_search:
+        if lyrics.strip() or not fetch_lyrics:
+            if not lyrics.strip() and not fetch_lyrics:
+                notes.append("未获取歌词：直接以 ASR 识别结果按停顿断句（不自动查找歌词）")
             return lyrics, "", []
         self._update(job_id, stage="lyrics", progress=0.04, message="从 网易云 / LRCLIB / LrcApi 获取原始歌词")
         match = lyrics_fetch.auto_fetch(_project_stub(filename, duration))
@@ -491,6 +552,8 @@ class OneShotJobs:
         retime: Callable[[list[Line]], list[str]] | None = None,
         detect_extras: bool = False,
         llm_merge: bool = False,
+        line_split: bool = True,
+        line_split_max_chars: int | None = None,
     ) -> dict[str, Any]:
         notes: list[str] = list(run_notes or [])
         lines: list[Line]
@@ -525,9 +588,28 @@ class OneShotJobs:
                 lines = timeline.lines
                 notes.extend(timeline.notes)
         else:
-            on_progress(0.8, "按识别停顿断句")
-            lines = lines_from_words(words)
-            notes.append("未提供歌词：文本来自 ASR 识别结果，按停顿断句")
+            on_progress(0.8, "按语义断句")
+            groups, split_used = (
+                split_lines_llm(
+                    words,
+                    language=language,
+                    gap=LINE_GAP_SEC,
+                    max_chars=line_split_max_chars,
+                )
+                if line_split
+                else (None, False)
+            )
+            if not split_used:
+                groups = group_words(words)
+            lines = lines_from_groups(groups)
+            notes.append(
+                "未提供歌词：文本来自 ASR 识别结果，"
+                + (
+                    f"由 LLM 按语义断句（{describe_line_limit(language, line_split_max_chars)}）"
+                    if split_used
+                    else "按停顿断句"
+                )
+            )
 
         if retime is not None and lines:
             # Line positions are settled; the per-character pass gives every

@@ -200,8 +200,9 @@ def test_asr_align_is_a_project_setting_that_keeps_the_cache(client, project, fr
 def test_word_sync_search_is_a_project_setting(client, project, fresh_db):
     """Off means "only the entry the lyrics came from", so a foreign payload goes."""
     pid = project["id"]
-    # On unless turned off: the studio cut often has no 逐字 data, the live one does.
-    assert project["word_sync_search"] is True
+    # Off unless turned on: the search costs a second chain of source queries
+    # and only pays off when the studio entry has no 逐字 data.
+    assert project["word_sync_search"] is False
 
     with fresh_db.connect() as conn:
         fresh_db.update_project(
@@ -260,6 +261,57 @@ def test_list_and_delete_project(client):
 
     assert client.delete(f"/api/projects/{created['id']}").status_code == 204
     assert client.get(f"/api/projects/{created['id']}").status_code == 404
+
+
+def test_batch_delete_removes_every_project_and_what_it_owns(client):
+    """The home page's batch delete: rows, audio and ``work/`` all go."""
+    from tests.conftest import wait_for_project
+
+    from app.config import settings
+
+    ids = []
+    for name in ("batch-a.mp3", "batch-b.mp3"):
+        with open("tests/fixtures/sample.mp3", "rb") as handle:
+            created = client.post("/api/projects", files={"file": (name, handle, "audio/mpeg")}).json()
+        wait_for_project(client, created["id"])
+        ids.append(created["id"])
+        # Something the run would have written, so the sweep has a target.
+        work = settings.data_dir / "work" / created["id"]
+        work.mkdir(parents=True, exist_ok=True)
+        (work / "vocals.wav").write_bytes(b"x")
+
+    response = client.post("/api/projects/delete", json={"ids": ids})
+    assert response.status_code == 204, response.text
+    for project_id in ids:
+        assert client.get(f"/api/projects/{project_id}").status_code == 404
+        assert not (settings.data_dir / "work" / project_id).exists()
+    listed = client.get("/api/projects").json()
+    assert not [item for item in listed["items"] if item["id"] in ids]
+
+    # An unknown id in the batch is a 404, not a silent skip.
+    assert client.post("/api/projects/delete", json={"ids": ["prj_missing"]}).status_code == 404
+    # An empty batch is rejected by the schema, not by the handler.
+    assert client.post("/api/projects/delete", json={"ids": []}).status_code == 422
+
+
+def test_batch_delete_refuses_a_project_that_is_still_running(client):
+    """A worker is writing into ``work/`` right now; the whole batch waits."""
+    with open("tests/fixtures/sample.mp3", "rb") as handle:
+        created = client.post("/api/projects", files={"file": ("busy.mp3", handle, "audio/mpeg")}).json()
+
+    # Stop the pipeline mid-run rather than mock it: the status is what counts.
+    from app import db
+
+    with db.connect() as conn:
+        db.update_project(conn, created["id"], status="processing")
+
+    response = client.post("/api/projects/delete", json={"ids": [created["id"]]})
+    assert response.status_code == 409
+    assert client.get(f"/api/projects/{created['id']}").status_code == 200
+
+    with db.connect() as conn:
+        db.update_project(conn, created["id"], status="ready")
+    assert client.post("/api/projects/delete", json={"ids": [created["id"]]}).status_code == 204
 
 
 def test_export_with_a_cjk_title_keeps_headers_latin1(client, project):

@@ -36,18 +36,28 @@ export function AlignPanel({ project, task, busy, onProjectChange, onRun }: Prop
   const [language, setLanguage] = useState(project.lyrics_language ?? "auto");
   const [separate, setSeparate] = useState(project.separate_vocals ?? true);
   const [hfaChars, setHfaChars] = useState(project.hfa_chars ?? false);
-  const [wordSyncSearch, setWordSyncSearch] = useState(project.word_sync_search ?? true);
+  const [wordSyncSearch, setWordSyncSearch] = useState(project.word_sync_search ?? false);
   const [detectExtras, setDetectExtras] = useState(project.detect_extras ?? false);
   const [llmMerge, setLlmMerge] = useState(project.llm_merge ?? false);
+  const [fetchLyrics, setFetchLyrics] = useState(project.fetch_lyrics ?? true);
+  const [lineSplit, setLineSplit] = useState(project.line_split ?? true);
+  const [lineSplitMaxChars, setLineSplitMaxChars] = useState<string>(
+    project.line_split_max_chars == null ? "" : String(project.line_split_max_chars),
+  );
 
   useEffect(() => {
     setLyrics(project.original_lyrics);
     setLanguage(project.lyrics_language ?? "auto");
     setSeparate(project.separate_vocals ?? true);
     setHfaChars(project.hfa_chars ?? false);
-    setWordSyncSearch(project.word_sync_search ?? true);
+    setWordSyncSearch(project.word_sync_search ?? false);
     setDetectExtras(project.detect_extras ?? false);
     setLlmMerge(project.llm_merge ?? false);
+    setFetchLyrics(project.fetch_lyrics ?? true);
+    setLineSplit(project.line_split ?? true);
+    setLineSplitMaxChars(
+      project.line_split_max_chars == null ? "" : String(project.line_split_max_chars),
+    );
     setCandidates(null);
     setSearchError(null);
     setQuery("");
@@ -198,7 +208,29 @@ export function AlignPanel({ project, task, busy, onProjectChange, onRun }: Prop
           {searching ? "查询中…" : "查找歌词"}
         </button>
       </div>
-      <p className="muted small" style={{ margin: "0 0 8px" }}>
+      <label className="align-option" style={{ marginTop: 4 }}>
+        <input
+          type="checkbox"
+          checked={fetchLyrics}
+          disabled={busy}
+          onChange={(event) => {
+            setFetchLyrics(event.target.checked);
+            void api
+              .updateProject(project.id, { fetch_lyrics: event.target.checked })
+              .then(onProjectChange)
+              .catch((err: unknown) => setSearchError(errorMessage(err)));
+          }}
+        />
+        <span>
+          <b>自动获取歌词</b>
+          <span className="muted small">
+            默认开：点「开始对齐」时如果还没粘贴歌词，才会自动从网易云 / LRCLIB / LrcApi 查找原歌词——上传音频本身
+            不会去网上抓任何东西。关掉后本次不自动查找：你可以先手动粘贴，或完全不提供歌词直接走 ASR，
+            结果文本来自识别，不会在背后去抓歌词。
+          </span>
+        </span>
+      </label>
+      <p className="muted small" style={{ margin: "8px 0" }}>
         依次查找 网易云 → LRCLIB → 内网 LrcApi，取第一个带逐字歌词的可信结果（没有逐字歌词时退回文本）。
       </p>
 
@@ -238,7 +270,7 @@ export function AlignPanel({ project, task, busy, onProjectChange, onRun }: Prop
         rows={10}
         value={lyrics}
         onChange={(event) => setLyrics(event.target.value)}
-        placeholder={"每行一句歌词。上传后会自动查找；也可以直接粘贴，带 [mm:ss.xx] 时间戳的 LRC 也行（时间戳只用来估计每行位置，不会被写进结果）。"}
+        placeholder={"每行一句歌词。上传不会自动查找；打开「自动获取歌词」后，开始对齐时才会去查，也可以直接粘贴，带 [mm:ss.xx] 时间戳的 LRC 也行（时间戳只用来估计每行位置，不会被写进结果）。"}
       />
 
       <div className="row" style={{ marginTop: 10, gap: 8 }}>
@@ -330,7 +362,8 @@ export function AlignPanel({ project, task, busy, onProjectChange, onRun }: Prop
             <b>查找其他版本的逐字歌词</b>
             <span className="muted small">
               本项目这条歌词没有逐字歌词时，去同一首歌的其他版本（例如现场版）里找。找到的版本要先和这段音频核对
-              吻合才采用，采用后它的逐字时间直接作为结果。默认开；关掉则只用本项目歌词条目自带的数据。
+              吻合才采用，采用后它的逐字时间直接作为结果。默认关；打开则额外多一轮源链查询，只在原条目本身没有逐字
+              歌词时才可能拿到数据。
             </span>
           </span>
         </label>
@@ -381,7 +414,75 @@ export function AlignPanel({ project, task, busy, onProjectChange, onRun }: Prop
             </span>
           </span>
         </label>
+
+        <label className="align-option">
+          <input
+            type="checkbox"
+            checked={lineSplit}
+            disabled={busy}
+            onChange={(event) => {
+              setLineSplit(event.target.checked);
+              void api
+                .updateProject(project.id, { line_split: event.target.checked })
+                .then(onProjectChange)
+                .catch((err: unknown) => setSearchError(errorMessage(err)));
+            }}
+          />
+          <span>
+            <b>LLM 智能分句</b>
+            <span className="muted small">
+              默认开，只在<b>没有歌词</b>时起作用：识别文本交给 LLM 一次，由它判断一句唱在哪里结束，而不是只看
+              识别器停顿的地方（停顿是换气，不一定是句子结束）。LLM 只决定在哪里断行，不改动、不增删任何字符，
+              也不产生任何时间——答案拼回去和识别文本对不上就整段丢弃，仍按停顿断句，所以打开它不会有任何损失。
+            </span>
+          </span>
+        </label>
+
+        {lineSplit && (
+          <label className="align-option">
+            <span>
+              <b>每行最多字数</b>
+              <input
+                type="number"
+                min={1}
+                max={60}
+                value={lineSplitMaxChars}
+                disabled={busy}
+                placeholder="按语言（中文 12 / 日语 18）"
+                onChange={(event) => setLineSplitMaxChars(event.target.value)}
+                onBlur={() => {
+                  const raw = lineSplitMaxChars.trim();
+                  const value = raw === "" ? null : Number(raw);
+                  const sane = value === null || (Number.isFinite(value) && value >= 1 && value <= 60);
+                  if (!sane) {
+                    setLineSplitMaxChars(
+                      project.line_split_max_chars == null
+                        ? ""
+                        : String(project.line_split_max_chars),
+                    );
+                    return;
+                  }
+                  void api
+                    .updateProject(project.id, { line_split_max_chars: value })
+                    .then(onProjectChange)
+                    .catch((err: unknown) => setSearchError(errorMessage(err)));
+                }}
+                style={{ maxWidth: 120, marginLeft: 8 }}
+              />
+              <span className="muted small">
+                留空表示按语言：中文 / 粤语 12 字，日语 / 韩语 18 字，其他 24 字。填数字则这个项目一律用它。
+                这是上限不是目标——LLM 可以断得更短，但某一行超过它的答案会被拒收。
+              </span>
+            </span>
+          </label>
+        )}
       </div>
+
+      <p className="muted small" style={{ marginTop: 0, marginBottom: 0 }}>
+        {fetchLyrics
+          ? "开始对齐时若没有歌词，会先自动查找原歌词；你也可以直接粘贴或关掉自动获取走纯 ASR。上传音频本身不会触发查找。"
+          : "已关闭自动获取歌词：本次不会去查找，直接用 ASR 识别结果（或你手动粘贴的歌词）做后续处理。"}
+      </p>
 
       <div className="row" style={{ marginTop: 12, gap: 8 }}>
         <button
@@ -390,7 +491,7 @@ export function AlignPanel({ project, task, busy, onProjectChange, onRun }: Prop
           onClick={() => onRun(false)}
           title={
             lineCount === 0
-              ? "还没有歌词：将直接用 ASR 识别结果按停顿断句（文本是识别出来的，不是歌词）"
+              ? "还没有歌词：将直接用 ASR 识别结果断句（文本是识别出来的，不是歌词）"
               : "识别定位每一行 → 逐字时间（打开「按语意合并成词」时再由 LLM 断词）"
           }
         >

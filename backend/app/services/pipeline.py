@@ -39,8 +39,14 @@ from ..audio import cut_audio, probe_audio
 from ..config import settings
 from ..schemas import Line, Timeline, Word
 from ..tasks import update_progress
-from . import char_align, llm_merge, lyrics_fetch, word_stream, word_sync
-from .asr_lines import lines_from_words, repair_word_times
+from . import char_align, line_split, llm_merge, lyrics_fetch, word_stream, word_sync
+from .asr_lines import (
+    LINE_GAP_SEC,
+    group_words,
+    lines_from_groups,
+    lines_from_words,
+    repair_word_times,
+)
 from .asr_repair import (
     prepared_audio,
     repair_gaps,
@@ -61,7 +67,13 @@ logger = logging.getLogger("lyrictrace.pipeline")
 
 
 def pipeline_handler(task_id: str, task: dict[str, Any]) -> None:
-    """Upload-time work: audio info + metadata. No network, no lyric guessing."""
+    """Upload-time work: audio info + metadata. No network, no lyric guessing.
+
+    Deliberately stops before the lyrics: uploading a file must not go looking
+    for a song on the internet. Whether the sources are asked at all is decided
+    by the 「自动获取歌词」 switch when the run starts (``align_handler``), so a
+    file can be uploaded, listened to, and described without any lookup.
+    """
     project_id = task["project_id"]
     with db.connect() as conn:
         project = db.fetch_project(conn, project_id)
@@ -93,10 +105,6 @@ def pipeline_handler(task_id: str, task: dict[str, Any]) -> None:
             fields["album"] = metadata.album
         fields["metadata_source"] = metadata.source
         fields["metadata_json"] = metadata.model_dump_json()
-
-    update_progress(task_id, stage="lyrics", progress=0.8, message="从 网易云 / LRCLIB / LrcApi 获取原始歌词")
-    lyrics_fields = _fetch_lyrics_fields({**project, **fields}, task_id=task_id)
-    fields.update(lyrics_fields)
 
     fields.update(status="needs_review", error=None, progress=1)
     with db.connect() as conn:
@@ -131,10 +139,11 @@ LYRIC_FIELDS = (
 def _search_fields(project: dict[str, Any]) -> dict[str, Any]:
     """Song title/artist to search with, extracted by the LLM if still missing.
 
-    The upload handler already extracts metadata before it looks anything up, so
-    this only matters when a project reached the align step without a title (an
-    old project, a failed extraction). Searching on the raw filename would query
-    the sources with the uploader's channel name, which finds the wrong song.
+    The upload handler already extracts metadata before a run looks anything up,
+    so this only matters when a project reached the align step without a title
+    (an old project, a failed extraction). Searching on the raw filename would
+    query the sources with the uploader's channel name, which finds the wrong
+    song.
     """
     fields = {"title": project.get("title") or "", "artist": project.get("artist") or ""}
     if fields["title"] or not project.get("original_filename"):
@@ -167,10 +176,14 @@ def _fetch_lyrics_fields(
 
     Title and artist come first — by LLM where they are still unknown — because
     every source is queried by name, and a wrong name finds a wrong song.
+
+    ``fetch_lyrics`` on the project (default on) is the switch: off means the run
+    never asks the sources and aligns the ASR transcript (or pasted lyrics)
+    instead. Only the align handler calls this — an upload never does.
     """
     if (project.get("original_lyrics") or "").strip():
         return {}
-    if not settings.auto_search:
+    if not settings.auto_search or not bool(project.get("fetch_lyrics", True)):
         return {}
     search_fields = _search_fields(project)
     metadata_fields = {
@@ -274,21 +287,27 @@ def align_handler(task_id: str, task: dict[str, Any]) -> None:
 
     lines = _lines_for_alignment(project)
     if not (project.get("original_lyrics") or "").strip():
-        # No real lyrics yet — the text in the timeline is the ASR transcript
-        # from an earlier run. Ask the sources again: an upload-time lookup may
-        # have failed (every source was down, metadata was still being
-        # extracted), and a miss back then must not become permanent just
-        # because the fallback filled the timeline. Lyrics the user pasted are
-        # in ``original_lyrics`` and never reach this branch.
-        update_progress(
-            task_id, stage="lyrics", progress=0.05, message="从 网易云 / LRCLIB / LrcApi 获取原始歌词"
-        )
-        fields = _fetch_lyrics_fields(project, task_id=task_id, trace=trace)
-        if fields:
-            with db.connect() as conn:
-                db.update_project(conn, project_id, **fields)
-            project = {**project, **fields}
-            lines = _lines_for_alignment(project)
+        # No real lyrics yet. Two cases:
+        # - fetch_lyrics is on (default): ask the sources now. This is the only
+        #   place the lookup happens — uploading a file never goes looking for a
+        #   song, so the run starts with whatever the user pasted. Lyrics the
+        #   user pasted are in ``original_lyrics`` and never reach this branch.
+        # - fetch_lyrics is off: never ask the sources. The text stays whatever
+        #   was pasted (or empty → the ASR transcript below).
+        if bool(project.get("fetch_lyrics", True)):
+            update_progress(
+                task_id, stage="lyrics", progress=0.05, message="从 网易云 / LRCLIB / LrcApi 获取原始歌词"
+            )
+            fields = _fetch_lyrics_fields(project, task_id=task_id, trace=trace)
+            if fields:
+                with db.connect() as conn:
+                    db.update_project(conn, project_id, **fields)
+                project = {**project, **fields}
+                lines = _lines_for_alignment(project)
+        elif not (project.get("revised_lyrics") or "").strip():
+            update_progress(
+                task_id, stage="lyrics", progress=0.05, message="未获取歌词：直接以 ASR 识别结果按停顿断句"
+            )
     trace.step(
         "lyrics_selected",
         {
@@ -546,18 +565,61 @@ def _align_from_asr(
     )
 
     if not lines:
-        # No lyrics anywhere: no source has this song (an original or
-        # unreleased track) and nothing was pasted. The transcript is then the
-        # only honest text — same fallback the one-shot API uses.
+        # No lyrics anywhere: either fetch_lyrics is off (the user chose not to
+        # look them up) or no source has this song (an original or unreleased
+        # track) and nothing was pasted. The transcript is then the only honest
+        # text — same fallback the one-shot API uses.
         update_progress(task_id, stage="align", progress=0.8, message="按识别停顿断句")
+        update_progress(task_id, stage="align", progress=0.8, message="按语义断句")
+        max_chars = _max_line_chars(project)
+        groups, split_used = (
+            line_split.split_lines(
+                words,
+                language=language,
+                gap=LINE_GAP_SEC,
+                max_chars=max_chars,
+            )
+            if _splits_lines(project)
+            else (None, False)
+        )
+        if not split_used:
+            groups = group_words(words)
+        no_lyrics_note = (
+            "未获取歌词：本次不自动查找，文本来自 ASR 识别结果，"
+            + (
+                f"由 LLM 按语义断句（{line_split.describe(language, max_chars)}）"
+                if split_used
+                else "按停顿断句"
+            )
+            if not bool(project.get("fetch_lyrics", True))
+            else "没有歌词：网易云 / LRCLIB / LrcApi 都没有找到匹配项，"
+            "文本来自 ASR 识别结果，"
+            + (
+                f"由 LLM 按语义断句（{line_split.describe(language, max_chars)}）"
+                if split_used
+                else "按停顿断句"
+            )
+            + "（这条路径没有原始歌词可对齐）"
+        )
         timeline = Timeline(
             status="none",
-            lines=lines_from_words(words),
+            lines=lines_from_groups(groups),
             updated_at=db.now_iso(),
-            notes=[
-                "没有歌词：网易云 / LRCLIB / LrcApi 都没有找到匹配项，"
-                "文本来自 ASR 识别结果，按停顿断句（这条路径没有原始歌词可对齐）"
-            ],
+            notes=[no_lyrics_note],
+        )
+        trace.step(
+            "line_split",
+            {
+                "used": split_used,
+                "language": language or "（自动）",
+                "limit": line_split.max_chars_for(language, override=max_chars),
+                "lines": len(groups),
+                "note": (
+                    "LLM 只决定在哪里断行，不改动任何字符；断行结果与识别文本不一致时退回按停顿断句"
+                    if split_used
+                    else "没有可用的 LLM 断行结果，按识别停顿断句"
+                ),
+            },
         )
         # The transcript still needs per-character times: the recogniser's own
         # tokens are word-sized, so ``この`` would be one highlight block for
@@ -880,7 +942,19 @@ def _reference_for(project: dict[str, Any], lines: list[Line]) -> dict[int, Line
 def _searches_other_editions(project: dict[str, Any]) -> bool:
     """Whether this project allows looking for 逐字 lyrics in another edition."""
     value = project.get("word_sync_search")
+    return False if value is None else bool(value)
+
+
+def _splits_lines(project: dict[str, Any]) -> bool:
+    """Whether a run with no lyrics asks the LLM where the lines break."""
+    value = project.get("line_split")
     return True if value is None else bool(value)
+
+
+def _max_line_chars(project: dict[str, Any]) -> int | None:
+    """This project's own characters-per-line ceiling, or ``None`` for per language."""
+    value = project.get("line_split_max_chars")
+    return None if value is None else int(value)
 
 
 def _find_word_sync_edition(project: dict[str, Any], lines: list[Line]):

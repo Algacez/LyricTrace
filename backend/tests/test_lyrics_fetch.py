@@ -182,21 +182,38 @@ def fake_lrclib(monkeypatch):
     return calls
 
 
-def test_pipeline_fills_lyrics_from_the_api(client, fake_lrclib):
+def test_align_fills_lyrics_from_the_api(client, fake_lrclib, monkeypatch):
+    """The lookup happens when the run starts, not when the file was uploaded."""
     from app.config import settings
     from tests.conftest import AUDIO_FIXTURE, wait_for_project, wait_for_task
 
+    # The lookup is what this test is about; the ASR that would follow it is not.
+    from app.services import pipeline
+
+    def no_asr(*_args, **_kwargs):
+        raise AssertionError("the align run must not reach the ASR in this test")
+
+    monkeypatch.setattr(pipeline, "_align_from_asr", no_asr)
     settings.auto_search = True
     try:
         with AUDIO_FIXTURE.open("rb") as handle:
             response = client.post(
                 "/api/projects",
-                files={"file": ("ずっと真夜中でいいのに。 - 残機.mp3", handle, "audio/mpeg")},
+                files={"file": ("ずっと真夜中でいいかに。 - 残機.mp3", handle, "audio/mpeg")},
             )
         assert response.status_code == 201, response.text
         project_id = response.json()["id"]
         task = wait_for_task(client, client.get(f"/api/projects/{project_id}/tasks").json()[0]["id"])
         assert task["status"] == "succeeded", task
+        # Uploading the file must not have looked anything up: no lyrics yet.
+        data = wait_for_project(client, project_id)
+        assert data["lyrics_source"] is None
+        assert data["original_lyrics"] == ""
+        assert not fake_lrclib, "the upload asked the lyric sources"
+        # Starting the run is what fetches them.
+        align = client.post(f"/api/projects/{project_id}/align", json={})
+        assert align.status_code == 202, align.text
+        wait_for_task(client, align.json()["id"])
         data = wait_for_project(client, project_id)
     finally:
         settings.auto_search = False
@@ -208,6 +225,41 @@ def test_pipeline_fills_lyrics_from_the_api(client, fake_lrclib):
     assert data["timeline_status"] == "untimed"
     assert all(line["start"] is None for line in data["timeline"]["lines"])
     assert fake_lrclib and fake_lrclib[0]["project"]["title"]
+
+
+def test_pipeline_skips_the_lyrics_lookup_when_fetch_lyrics_is_off(client, monkeypatch):
+    """``fetch_lyrics=False`` on a project with no pasted lyrics → no source call."""
+    from app.config import settings
+    from app.services import lyrics_fetch
+    from app.services.pipeline import _fetch_lyrics_fields
+    from tests.conftest import AUDIO_FIXTURE
+
+    monkeypatch.setattr(settings, "auto_search", True)
+    searched = []
+
+    def should_not_fetch(_project):
+        searched.append(True)
+        raise AssertionError("auto_fetch ran while fetch_lyrics was off")
+
+    monkeypatch.setattr(lyrics_fetch, "auto_fetch", should_not_fetch)
+    try:
+        fields = _fetch_lyrics_fields(
+            {"title": "残機", "original_lyrics": "", "fetch_lyrics": False}
+        )
+        assert fields == {}
+        # A real upload with no pasted lyrics and fetch_lyrics off must also skip.
+        with AUDIO_FIXTURE.open("rb") as handle:
+            created = client.post(
+                "/api/projects",
+                files={"file": ("原创曲 - 泠鸢.mp3", handle, "audio/mpeg")},
+            ).json()
+        client.patch(f"/api/projects/{created['id']}", json={"fetch_lyrics": False})
+        assert _fetch_lyrics_fields(
+            {"title": "残機", "original_lyrics": "", "fetch_lyrics": False}
+        ) == {}
+    finally:
+        settings.auto_search = False
+    assert searched == []
 
 
 def test_pipeline_keeps_user_lyrics_over_the_api(client, project, fake_lrclib):

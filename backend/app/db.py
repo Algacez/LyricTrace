@@ -142,9 +142,9 @@ MIGRATIONS = {
         # (see char_align).
         "asr_align": "INTEGER DEFAULT 0",
         # Look for 逐字 lyrics in other editions of the same song when the entry
-        # the lyrics came from has none. On by default: the studio cut often has
-        # no ``yrc`` while the live edition of the same song does.
-        "word_sync_search": "INTEGER DEFAULT 1",
+        # the lyrics came from has none. Off by default (see ``config``): a
+        # project asks for it by setting the column to 1.
+        "word_sync_search": "INTEGER DEFAULT 0",
         # Whether the cached tokens came from the separated vocals or the raw
         # mix; switching between them is a different audio, so the cache cannot
         # be reused.
@@ -172,6 +172,20 @@ MIGRATIONS = {
         # LLM only decides where the boundaries are — every unit takes the
         # span of the characters it covers (see llm_merge).
         "llm_merge": "INTEGER DEFAULT 0",
+        # Whether the run looks the song up in NetEase / LRCLIB / LrcApi when
+        # the user has not pasted lyrics. On by default: the matcher fetches
+        # the original lyrics automatically. Off, the run never asks the
+        # sources — it aligns the ASR transcript (or the lyrics the user did
+        # paste) and nothing is fetched behind the user's back.
+        "fetch_lyrics": "INTEGER DEFAULT 1",
+        # Whether a run with no lyrics asks the LLM where the lines break (see
+        # ``services/line_split``). On by default: the recogniser's pauses are
+        # where the singer breathed, not where a sung line ended.
+        "line_split": "INTEGER DEFAULT 1",
+        # This project's own ceiling on the characters per line when there are
+        # no lyrics. NULL means "per language" (``config.line_split_max_chars``,
+        # 12 for Chinese and 18 for Japanese); a number overrides the table.
+        "line_split_max_chars": "INTEGER",
     },
 }
 

@@ -573,6 +573,59 @@ def test_oneshot_skips_the_other_edition_search_when_switched_off(tmp_path, monk
     assert not any("其他版本" in note for note in notes)
 
 
+def test_oneshot_does_not_fetch_lyrics_when_fetch_lyrics_is_off(tmp_path, monkeypatch):
+    """``fetch_lyrics=False`` means: align the ASR transcript, never ask sources."""
+    from app.config import settings
+    from app.services import lyrics_fetch
+    from app.services.oneshot import OneShotJobs
+
+    def should_not_fetch(_project):
+        raise AssertionError("auto_fetch ran while fetch_lyrics was off")
+
+    monkeypatch.setattr(lyrics_fetch, "auto_fetch", should_not_fetch)
+    monkeypatch.setattr(settings, "auto_search", True)
+    jobs = OneShotJobs(root=tmp_path)
+    try:
+        notes: list[str] = []
+        lyrics, _synced, sync_lines = jobs._resolve_lyrics(
+            "job_nofetch", "", "原创曲.mp3", notes, word_sync_search=True, fetch_lyrics=False
+        )
+    finally:
+        settings.auto_search = False
+        jobs.shutdown()
+    assert lyrics == ""
+    assert sync_lines == []
+    assert any("未获取歌词" in note for note in notes)
+
+
+def test_oneshot_fetches_lyrics_when_fetch_lyrics_is_on_and_none_pasted(client, fake_asr, monkeypatch):
+    """The default: a run with no lyrics and no pasted text looks the song up."""
+    from app.config import settings
+    from app.services import lyrics_fetch
+    from tests.conftest import AUDIO_FIXTURE
+
+    seen: dict = {}
+
+    def capture(project):
+        seen.update(project)
+        return None
+
+    monkeypatch.setattr(lyrics_fetch, "auto_fetch", capture)
+    monkeypatch.setattr(settings, "auto_search", True)
+    try:
+        with AUDIO_FIXTURE.open("rb") as handle:
+            response = client.post(
+                "/api/align",
+                files={"file": ("残機 - ずっと真夜中でいいのに。.mp3", handle, "audio/mpeg")},
+                data={"separate": "false", "fetch_lyrics": "true"},
+            )
+        assert response.status_code == 202, response.text
+        _wait_for_job(client, response.json()["job_id"])
+    finally:
+        settings.auto_search = False
+    assert seen["title"]
+
+
 def test_oneshot_uses_source_word_timings_when_they_fit_the_audio(tmp_path):
     """A source's 逐字 timings replace the local pipeline only when they agree."""
     from app.schemas import Word
@@ -646,9 +699,141 @@ def test_oneshot_ignores_source_word_timings_that_do_not_fit(tmp_path, monkeypat
     assert not any("逐字歌词" in note for note in result["notes"])
 
 
+def _job_store(monkeypatch, tmp_path):
+    """Point the router at a job store of its own, and hand back its root.
+
+    Every test that deletes or edits a cached job needs this: the store the
+    deployment uses is shared state, and one test's ``rmtree`` would otherwise
+    take out another's.
+    """
+    from app.services import oneshot
+
+    root = tmp_path / f"cache-{abs(hash(str(tmp_path)))}"
+    jobs = oneshot.OneShotJobs(root=root)
+    monkeypatch.setattr("app.routers.align.jobs", jobs)
+    return jobs
+
+
+def test_a_cached_result_can_be_corrected_in_the_browser(client, fake_asr, tmp_path, monkeypatch):
+    """The cache page edits with the project page's editor, so the correction
+    has to round-trip through ``PUT /api/align/{job_id}/result``."""
+    from app.schemas import Line, OneShotResult
+    from tests.conftest import AUDIO_FIXTURE
+
+    jobs = _job_store(monkeypatch, tmp_path)
+    try:
+        with AUDIO_FIXTURE.open("rb") as handle:
+            created = client.post(
+                "/api/align",
+                files={"file": ("残機.mp3", handle, "audio/mpeg")},
+                data={"separate": "false"},
+            )
+        job_id = created.json()["job_id"]
+        original = _wait_for_job(client, job_id)
+        assert original["status"] == "succeeded"
+
+        # Move the first character of the first line to 1.5 s, the way a drag in
+        # the editor would, and write the whole result back.
+        result = OneShotResult(**original["result"])
+        result.lines[0].words[0].start = 1.5
+        result.words[0].start = 1.5
+        response = client.put(f"/api/align/{job_id}/result", json=result.model_dump())
+        assert response.status_code == 200, response.text
+        stored = response.json()
+        assert stored["edited_at"]
+        assert stored["result"]["lines"][0]["words"][0]["start"] == 1.5
+        # The flat list was rebuilt from the lines, not left pointing at the
+        # old times — otherwise the two would disagree about the same character.
+        assert stored["result"]["words"][0]["start"] == 1.5
+
+        # And it survives a reload, which is the whole point of writing it back.
+        reloaded = _wait_for_job(client, job_id)
+        assert reloaded["result"]["lines"][0]["words"][0]["start"] == 1.5
+
+        assert client.put("/api/align/job_missing/result", json=result.model_dump()).status_code == 404
+    finally:
+        jobs.shutdown()
+
+
+def test_a_failed_job_cannot_be_given_a_result(client, tmp_path, monkeypatch):
+    """There is no finished answer to correct; the record says so with a 404."""
+    import json
+
+    jobs = _job_store(monkeypatch, tmp_path)
+    try:
+        directory = jobs.job_dir("job_failed")
+        directory.mkdir(parents=True)
+        (directory / "job.json").write_text(
+            json.dumps({"job_id": "job_failed", "status": "failed", "error": "boom"}), encoding="utf-8"
+        )
+        response = client.put(
+            "/api/align/job_failed/result",
+            json={"lines": [{"text": "あ", "start": 0.0, "end": 1.0, "words": []}], "words": []},
+        )
+        assert response.status_code == 404
+    finally:
+        jobs.shutdown()
+
+
+def test_batch_delete_drops_the_record_and_the_uploaded_audio(client, fake_asr, tmp_path, monkeypatch):
+    """"删除所有相关文件": the whole job dir goes — record and source alike."""
+    from tests.conftest import AUDIO_FIXTURE
+
+    jobs = _job_store(monkeypatch, tmp_path)
+    try:
+        ids = []
+        for name in ("one.mp3", "two.mp3"):
+            with AUDIO_FIXTURE.open("rb") as handle:
+                created = client.post(
+                    "/api/align",
+                    files={"file": (name, handle, "audio/mpeg")},
+                    data={"separate": "false"},
+                )
+            ids.append(created.json()["job_id"])
+            _wait_for_job(client, created.json()["job_id"])
+        assert all(jobs.job_dir(job_id).exists() for job_id in ids)
+        assert all(jobs.input_path(job_id) is not None for job_id in ids)
+
+        assert client.post("/api/align/delete", json={"ids": ids}).status_code == 204
+        for job_id in ids:
+            assert not jobs.job_dir(job_id).exists()
+            assert client.get(f"/api/align/{job_id}").status_code == 404
+        listed = client.get("/api/align").json()
+        assert not [item for item in listed["items"] if item["job_id"] in ids]
+
+        assert client.post("/api/align/delete", json={"ids": ["job_missing"]}).status_code == 404
+        assert client.post("/api/align/delete", json={"ids": []}).status_code == 422
+    finally:
+        jobs.shutdown()
+
+
+def test_batch_delete_refuses_a_job_that_is_still_running(client, tmp_path, monkeypatch):
+    """Its worker is writing into that directory right now."""
+    import json
+
+    jobs = _job_store(monkeypatch, tmp_path)
+    try:
+        for job_id, status in (("job_running", "running"), ("job_done", "succeeded")):
+            directory = jobs.job_dir(job_id)
+            directory.mkdir(parents=True)
+            (directory / "input.mp3").write_bytes(b"x")
+            (directory / "job.json").write_text(
+                json.dumps({"job_id": job_id, "status": status, "filename": "a.mp3"}), encoding="utf-8"
+            )
+
+        response = client.post("/api/align/delete", json={"ids": ["job_running", "job_done"]})
+        assert response.status_code == 409
+        # All or nothing: the finished one is still there.
+        assert jobs.job_dir("job_done").exists()
+        assert client.get("/api/align/job_running").status_code == 200
+    finally:
+        jobs.shutdown()
+
+
 def test_the_cache_lists_the_newest_jobs_with_their_source(client, fake_asr, tmp_path, monkeypatch):
     """`GET /api/align` is what the web UI's cache page reads: the source file
     stays with the result, so a cached answer can be listened to again."""
+    from app.config import settings
     from app.services import oneshot
     from tests.conftest import AUDIO_FIXTURE
 
@@ -667,11 +852,12 @@ def test_the_cache_lists_the_newest_jobs_with_their_source(client, fake_asr, tmp
         assert _wait_for_job(client, job_id)["status"] == "succeeded"
 
         listing = client.get("/api/align").json()
-        assert listing["max_jobs"] == 5
+        assert listing["max_jobs"] == settings.oneshot_max_jobs
         assert [item["job_id"] for item in listing["items"]] == [job_id]
         item = listing["items"][0]
         assert item["filename"] == "残機.mp3"
         assert item["result"]["lines"]  # the finished per-character answer
+        assert item["with_audio"] is True
 
         audio = client.get(f"/api/align/{job_id}/audio")
         assert audio.status_code == 200
@@ -681,12 +867,11 @@ def test_the_cache_lists_the_newest_jobs_with_their_source(client, fake_asr, tmp
         jobs.shutdown()
 
 
-def test_the_cache_keeps_only_the_newest_five(monkeypatch, tmp_path):
-    """Six finished jobs, five kept — the newest, with their source files."""
+def test_the_history_keeps_every_job_and_its_result(monkeypatch, tmp_path):
+    """Six finished jobs, six kept: a record is history, not a cache."""
     import json
     from datetime import datetime, timedelta, timezone
 
-    from app.config import settings
     from app.services import housekeeping, oneshot
 
     jobs = oneshot.OneShotJobs(root=tmp_path / "oneshot")
@@ -695,11 +880,14 @@ def test_the_cache_keeps_only_the_newest_five(monkeypatch, tmp_path):
             directory = jobs.job_dir(f"job_{index}")
             directory.mkdir(parents=True)
             (directory / "input.mp3").write_bytes(b"x")
-            # Inside the 24-hour age limit, so only the count rule can fire.
-            stamp = datetime.now(timezone.utc) - timedelta(minutes=index)
             (directory / "job.json").write_text(
                 json.dumps(
-                    {"job_id": f"job_{index}", "status": "succeeded", "created_at": stamp.isoformat()}
+                    {
+                        "job_id": f"job_{index}",
+                        "status": "succeeded",
+                        "created_at": (datetime.now(timezone.utc) - timedelta(minutes=index)).isoformat(),
+                        "result": {"lines": [{"text": "あ", "start": 0.0, "end": 1.0, "words": []}]},
+                    }
                 ),
                 encoding="utf-8",
             )
@@ -708,8 +896,50 @@ def test_the_cache_keeps_only_the_newest_five(monkeypatch, tmp_path):
     finally:
         jobs.shutdown()
 
-    # job_0 is the newest; job_5 is the one over the count limit.
     left = sorted(path.name for path in (tmp_path / "oneshot").iterdir())
-    assert left == [f"job_{index}" for index in range(5)]
-    assert sweep.jobs == ["job_5"]
-    assert settings.oneshot_cache_jobs == 5
+    assert left == [f"job_{index}" for index in range(6)]
+    assert sweep.jobs == []
+    # Every one of them still polls and still replays.
+    listing = jobs.recent()
+    assert len(listing) == 6
+    assert all(job["result"]["lines"] for job in listing)
+    assert all(jobs.input_path(job["job_id"]) is not None for job in listing)
+
+
+def test_an_old_job_still_polls_after_its_source_is_dropped(monkeypatch, tmp_path):
+    """Past the age limit the upload goes; the answer stays readable."""
+    import json
+    from datetime import datetime, timedelta, timezone
+
+    from app.config import settings
+    from app.services import housekeeping, oneshot
+
+    jobs = oneshot.OneShotJobs(root=tmp_path / "oneshot")
+    try:
+        directory = jobs.job_dir("job_old")
+        directory.mkdir(parents=True)
+        (directory / "input.m4a").write_bytes(b"x" * 4096)
+        stamp = datetime.now(timezone.utc) - timedelta(hours=settings.oneshot_max_age_hours + 1)
+        (directory / "job.json").write_text(
+            json.dumps(
+                {
+                    "job_id": "job_old",
+                    "status": "succeeded",
+                    "created_at": stamp.isoformat(),
+                    "finished_at": stamp.isoformat(),
+                    "filename": "old.m4a",
+                    "result": {"lines": [{"text": "あ", "start": 0.0, "end": 1.0, "words": []}]},
+                }
+            ),
+            encoding="utf-8",
+        )
+        sweep = housekeeping.Sweep()
+        housekeeping.sweep_oneshot(tmp_path / "oneshot", sweep)
+    finally:
+        jobs.shutdown()
+
+    polled = jobs.get("job_old")
+    assert polled is not None and polled["result"]["lines"]
+    assert jobs.input_path("job_old") is None
+    assert sweep.audio == ["input.m4a"]
+    assert not (tmp_path / "oneshot" / "job_old" / "input.m4a").exists()

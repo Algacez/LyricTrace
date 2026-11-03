@@ -1,27 +1,39 @@
 """Bounded caches: what may grow, how big, and when it is swept.
 
 Every long-running part of this app leaves files behind: a one-shot job keeps
-its upload and its 20-second ASR slices (≈100 MB for a four-minute song), a
-project keeps its work dir (the prepared 16 kHz vocals, the per-line slices,
-the second-backend cache), and an aborted upload leaves a staging file. None of
-that is needed once the answer has been read — but nothing deleted it either,
-so the disk grew by roughly one song per run.
+its 20-second ASR slices (≈100 MB for a four-minute song) and the audio it was
+given, a project keeps its work dir (the prepared 16 kHz vocals, the per-line
+slices, the second-backend cache), and an aborted upload leaves a staging file.
+None of that is needed once the answer has been read — but nothing deleted it
+either, so the disk grew by roughly one song per run.
 
-The sweep is deliberately conservative about *what* is a cache:
+The sweep is deliberately conservative about *what* is a cache, and it splits
+what a run leaves behind into two kinds:
+
+- **records** are never swept. A project row and the audio it points at; a
+  one-shot job's ``job.json`` (the request and its finished result). Those are
+  the answer — a caller may poll them again, and the 「API 缓存」 page replays
+  every request ever made.
+- **caches** are. A one-shot job's ``work/`` (the ASR slices) always, and its
+  ``input.<ext>`` once the job is older than ``oneshot_max_age_hours`` — a
+  request nobody has looked at for a day no longer needs its source file. The
+  result outlives it; ``GET /api/align`` reports ``with_audio`` so the UI can
+  say so instead of rendering a player that 404s. A project work dir, an
+  ``audio/`` file no project points at, and an ``_uploads/`` staging file are
+  caches too.
+
+The other rules:
 
 - the uploaded audio in ``data/audio`` belongs to a project and is only removed
   when the project row is gone (the same rule ``DELETE /api/projects`` uses);
-- a one-shot job is only removed when it is ``succeeded``/``failed`` and either
-  older than ``oneshot_max_age_hours``, beyond ``oneshot_cache_jobs``, or the
-  directory is over ``oneshot_max_mb`` — oldest first;
 - a project work dir is skipped while that project has a queued or running
   task, because the run is writing into it;
 - anything created in the last ``ORPHAN_GRACE`` is left alone: an upload is
   written to disk before its row is inserted, and a project's work dir is
   created after the sweep read the project table, so "no row points at it" is
   only evidence once the file has had time to be claimed;
-- ``job.json`` / the SQLite rows are never touched, so a job that is still
-  inside its limits can always be polled again.
+- a job directory with no readable ``job.json`` is not history, just a crash
+  between ``mkdir`` and the first write, and goes after the grace period.
 
 ``run()`` is idempotent and safe to call at any time; ``start()`` runs it at
 startup and then every ``housekeeping_interval_min``.
@@ -88,6 +100,8 @@ class Sweep:
 
     jobs: list[str] = field(default_factory=list)
     work_dirs: list[str] = field(default_factory=list)
+    #: Uploaded audio that no project points at (``data/audio``) plus the
+    #: source files of one-shot jobs past ``oneshot_max_age_hours``.
     audio: list[str] = field(default_factory=list)
     uploads: int = 0
     freed_bytes: int = 0
@@ -117,61 +131,70 @@ def _read_job(path: Path) -> dict[str, Any] | None:
         return None
 
 
+def _job_input(path: Path) -> Path | None:
+    """The uploaded source file inside a job directory, if it is still there."""
+    for candidate in sorted(path.glob("input.*")):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _drop_job_source(path: Path, sweep: Sweep) -> None:
+    """Remove a finished job's uploaded source, keeping its record and result."""
+    source = _job_input(path)
+    if source is None:
+        return
+    size = source.stat().st_size
+    source.unlink(missing_ok=True)
+    if not source.exists():
+        sweep.freed_bytes += size
+        sweep.audio.append(source.name)
+
+
 def sweep_oneshot(root: Path, sweep: Sweep) -> None:
-    """Drop finished jobs past the age, count and size limits; oldest first."""
+    """Keep every job record and its result; drop only the bulky derived files.
+
+    ``job.json`` *is* the answer the caller polls and the 「API 缓存」 page
+    replays, so it is history and stays forever. What a job leaves behind that
+    nobody reads again is:
+
+    - ``work/`` — the 20 s ASR slices, ~100 MB a song. The job itself drops it
+      when it ends; jobs from before that rule still carry one.
+    - ``input.<ext>`` — the uploaded source, the other ~4 MB a song. It is what
+      makes a cached result playable in the UI, so it is only dropped once the
+      job is older than ``oneshot_max_age_hours`` (a request nobody has looked
+      at for a day is no longer "the last result"). Delete the job explicitly
+      to drop it sooner.
+
+    The count and size limits do not apply here: history is not a cache. A job
+    directory with no readable record is still an orphan and goes after the
+    grace period, and a job that is ``queued``/``running`` is never touched.
+    """
     if not root.exists():
         return
-    finished: list[tuple[datetime, Path, int]] = []
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=settings.oneshot_max_age_hours)
     for path in sorted(root.iterdir()):
         if not path.is_dir() or path.name.startswith("_"):
             continue
         job = _read_job(path)
         if job is None:
+            # No record, no history: only a crash between mkdir and the first
+            # write leaves this, and the grace period covers that moment.
             if _age(path) > ORPHAN_GRACE:
                 _remove(path, sweep)
             continue
         if job.get("status") not in ("succeeded", "failed"):
             # Running or queued: its worker is writing into this directory.
             continue
-        finished.append((_finished_at(job, path), _size(path), path))
-
-    finished.sort(key=lambda item: item[0], reverse=True)
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=settings.oneshot_max_age_hours)
-    keep: list[tuple[datetime, int, Path]] = []
-    for index, item in enumerate(finished):
-        when = item[0]
-        # The count rule is the cache size the UI shows: the newest
-        # ``oneshot_cache_jobs`` requests keep their source *and* their result,
-        # so the web UI always has those five playable. The age rule still
-        # applies on top of it.
-        if when < cutoff or index >= settings.oneshot_cache_jobs:
-            _remove(item[2], sweep)
-        else:
-            keep.append(item)
-
-    # A job that stays inside its limits keeps ``input`` + ``job.json`` — that
-    # is the result the caller polls. Its ``work/`` (the ASR slices, ~100 MB a
-    # song) is what the job itself drops when it ends; jobs from before that
-    # rule still carry one, so the sweep drops it too.
-    if not settings.oneshot_keep_work:
-        for _when, _size_, path in keep:
+        if not settings.oneshot_keep_work:
             work = path / "work"
-            if not work.is_dir():
-                continue
-            work_size = _size(work)
-            shutil.rmtree(work, ignore_errors=True)
-            if not work.exists():
-                sweep.freed_bytes += work_size
-    keep = [(when, _size(path), path) for when, _size_, path in keep]
-
-    # The count rule keeps the newest; the size rule drops the oldest, so the
-    # result is "as many recent jobs as fit" rather than "whatever came last".
-    total = sum(size for _when, size, _path in keep)
-    for _when, size, path in sorted(keep, key=lambda item: item[0]):
-        if total <= settings.oneshot_max_mb * 1024 * 1024:
-            break
-        _remove(path, sweep)
-        total -= size
+            if work.is_dir():
+                work_size = _size(work)
+                shutil.rmtree(work, ignore_errors=True)
+                if not work.exists():
+                    sweep.freed_bytes += work_size
+        if not settings.oneshot_keep_input and _finished_at(job, path) < cutoff:
+            _drop_job_source(path, sweep)
 
 
 def _remove(path: Path, sweep: Sweep) -> None:
@@ -328,14 +351,23 @@ def usage() -> dict[str, Any]:
         )
     work_root = settings.data_dir / "work"
     work_dirs = sum(1 for path in work_root.iterdir() if path.is_dir()) if work_root.exists() else 0
+    sources = 0
+    if oneshot_root.exists():
+        sources = sum(1 for path in oneshot_root.iterdir() if _job_input(path) is not None)
     return {
         "data_dir": str(settings.data_dir),
         "oneshot": {
+            # Every job record on disk. Nothing sweeps these: they are history.
             "jobs": jobs,
+            # How many of them still carry the uploaded source (playable in the
+            # UI). Past ``max_age_hours`` the source goes; the result stays.
+            "with_source": sources,
             "mb": round(_size(oneshot_root) / (1024 * 1024), 1),
-            "max_jobs": settings.oneshot_cache_jobs,
+            # No longer a deletion rule — reported for the UI's copy only.
+            "max_jobs": settings.oneshot_max_jobs,
             "max_mb": settings.oneshot_max_mb,
             "max_age_hours": settings.oneshot_max_age_hours,
+            "keep_input": settings.oneshot_keep_input,
         },
         "work": {
             "dirs": work_dirs,

@@ -38,6 +38,7 @@ STEP_ORDER = (
     "llm_extras",
     "extra_retry",
     "extras",
+    "line_split",
     "char_align",
     "llm_merge",
     "timeline",

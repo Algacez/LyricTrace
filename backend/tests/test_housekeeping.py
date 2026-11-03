@@ -4,6 +4,10 @@ Every rule here protects something: a running job's directory, a project's
 work dir while its task runs, the uploaded audio of a live project, and the
 result a caller may still poll. The limits are the other half — a cache that is
 never swept is how the disk filled up in the first place.
+
+One-shot jobs are the exception: their *record* is history and is never swept.
+Only the derived files inside the directory go — ``work/`` always, and the
+uploaded source once the job is older than ``oneshot_max_age_hours``.
 """
 
 from __future__ import annotations
@@ -61,60 +65,69 @@ def _old(path: Path, seconds: float = 3600) -> Path:
     return path
 
 
-def test_a_finished_job_past_the_age_limit_is_removed(roots):
+def test_an_old_job_loses_its_source_but_keeps_its_result(roots):
+    """The record is history: past the age limit only the upload goes."""
     oneshot, _work, _audio = roots
-    old = _job(oneshot, "job_old", age_hours=settings.oneshot_max_age_hours + 1)
-    fresh = _job(oneshot, "job_fresh", age_hours=0)
+    old = _job(oneshot, "job_old", age_hours=settings.oneshot_max_age_hours + 1, size=4096)
+    fresh = _job(oneshot, "job_fresh", age_hours=0, size=4096)
 
     sweep = housekeeping.Sweep()
     housekeeping.sweep_oneshot(oneshot, sweep)
 
-    assert not old.exists()
-    # A job inside its limits stays: the caller may still poll it.
-    assert fresh.exists()
-    assert sweep.jobs == ["job_old"]
+    # The result the caller polls survives; the ~4 MB source does not.
+    assert old.exists() and (old / "job.json").exists()
+    assert not (old / "input.mp3").exists()
+    assert fresh.exists() and (fresh / "input.mp3").exists()
+    assert sweep.jobs == []
+    assert sweep.audio == ["input.mp3"]
+    assert sweep.freed_bytes == 4096
 
 
-def test_the_oldest_jobs_go_when_there_are_too_many(roots):
-    """The count limit is the API cache the web UI lists: the newest five."""
+def test_jobs_are_never_dropped_for_being_too_many(roots):
+    """History is not a cache: a hundred requests all stay listed and pollable."""
     oneshot, _work, _audio = roots
     for index in range(8):
-        _job(oneshot, f"job_{index}", age_hours=index)
+        _job(oneshot, f"job_{index}", age_hours=0)
 
-    original = settings.oneshot_cache_jobs
+    original = settings.oneshot_max_jobs
     try:
-        settings.oneshot_cache_jobs = 2
+        settings.oneshot_max_jobs = 2
         sweep = housekeeping.Sweep()
         housekeeping.sweep_oneshot(oneshot, sweep)
     finally:
-        settings.oneshot_cache_jobs = original
+        settings.oneshot_max_jobs = original
 
     left = sorted(path.name for path in oneshot.iterdir())
-    assert left == ["job_0", "job_1"]  # the two most recent
-    assert sorted(sweep.jobs) == ["job_2", "job_3", "job_4", "job_5", "job_6", "job_7"]
+    assert left == [f"job_{index}" for index in range(8)]
+    assert sweep.jobs == []
 
 
-def test_the_size_limit_drops_the_oldest_until_it_fits(roots):
+def test_the_size_limit_no_longer_deletes_jobs(roots):
     oneshot, _work, _audio = roots
     for index in range(3):
         _job(oneshot, f"job_{index}", age_hours=index, size=400 * 1024)
 
-    original_jobs, original_mb = settings.oneshot_cache_jobs, settings.oneshot_max_mb
+    original_jobs, original_mb = settings.oneshot_max_jobs, settings.oneshot_max_mb
     try:
-        settings.oneshot_cache_jobs = 100
+        settings.oneshot_max_jobs = 100
         settings.oneshot_max_mb = 1  # room for two of the three
         sweep = housekeeping.Sweep()
         housekeeping.sweep_oneshot(oneshot, sweep)
     finally:
-        settings.oneshot_cache_jobs, settings.oneshot_max_mb = original_jobs, original_mb
+        settings.oneshot_max_jobs, settings.oneshot_max_mb = original_jobs, original_mb
 
-    assert sorted(path.name for path in oneshot.iterdir()) == ["job_0", "job_1"]
-    assert sweep.jobs == ["job_2"]
+    # Every record and every source stays; the size limit is reported, not
+    # enforced against history (LYRICTRACE_ONESHOT_KEEP_INPUT=false is the
+    # default, and all three are inside the age limit here).
+    assert sorted(path.name for path in oneshot.iterdir()) == ["job_0", "job_1", "job_2"]
+    assert sweep.jobs == []
 
 
-def test_a_running_job_is_never_swept(roots):
+def test_a_running_job_keeps_everything_in_it(roots):
     oneshot, _work, _audio = roots
     running = _job(oneshot, "job_running", status="running", age_hours=1000)
+    (running / "work").mkdir()
+    (running / "work" / "vocals.wav").write_bytes(b"x" * 2048)
 
     original = settings.oneshot_max_age_hours
     try:
@@ -123,8 +136,10 @@ def test_a_running_job_is_never_swept(roots):
     finally:
         settings.oneshot_max_age_hours = original
 
-    # Its worker is writing into that directory right now.
+    # Its worker is writing into that directory right now: source and slices.
     assert running.exists()
+    assert (running / "input.mp3").exists()
+    assert (running / "work" / "vocals.wav").exists()
 
 
 def test_a_kept_job_loses_its_work_dir_but_keeps_its_result(roots):
@@ -276,27 +291,37 @@ def test_a_full_sweep_reads_the_projects_and_never_touches_a_row(roots, fresh_db
     assert "prj_live" in ids
 
 
-def test_usage_reports_the_limits(roots):
+def test_usage_reports_the_limits_and_the_sources_kept(roots):
     oneshot, work, _audio = roots
     _job(oneshot, "job_a", size=1024)
 
     report = housekeeping.usage()
 
     assert report["oneshot"]["jobs"] == 1
-    assert report["oneshot"]["max_jobs"] == settings.oneshot_cache_jobs
+    # Both the job and its source are still there, so both counts are 1.
+    assert report["oneshot"]["with_source"] == 1
+    assert report["oneshot"]["max_jobs"] == settings.oneshot_max_jobs
+    assert report["oneshot"]["max_age_hours"] == settings.oneshot_max_age_hours
+    assert report["oneshot"]["keep_input"] == settings.oneshot_keep_input
     assert report["work"]["max_mb"] == settings.work_max_mb
     assert report["interval_min"] == settings.housekeeping_interval_min
 
 
 def test_storage_endpoints_report_and_sweep(roots, client, fresh_db):
     oneshot, _work, _audio = roots
-    _job(oneshot, "job_old", age_hours=settings.oneshot_max_age_hours + 1)
+    old = _job(oneshot, "job_old", age_hours=settings.oneshot_max_age_hours + 1, size=2048)
+    (old / "work").mkdir()
+    (old / "work" / "vocals.wav").write_bytes(b"x" * 1024)
 
     report = client.get("/api/storage").json()
     assert report["oneshot"]["jobs"] == 1
     assert report["oneshot"]["max_age_hours"] == settings.oneshot_max_age_hours
 
     removed = client.post("/api/storage/cleanup").json()
-    assert removed["jobs"] == ["job_old"]
-    assert not (oneshot / "job_old").exists()
-    assert client.get("/api/storage").json()["oneshot"]["jobs"] == 0
+    # The record is history: the sweep only freed the derived files.
+    assert removed["jobs"] == []
+    assert removed["audio"] == ["input.mp3"]
+    assert (oneshot / "job_old" / "job.json").exists()
+    assert not (oneshot / "job_old" / "input.mp3").exists()
+    assert client.get("/api/storage").json()["oneshot"]["jobs"] == 1
+    assert client.get("/api/storage").json()["oneshot"]["with_source"] == 0

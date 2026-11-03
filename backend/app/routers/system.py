@@ -96,10 +96,17 @@ def get_config() -> dict[str, object]:
         "metadata_extractor": settings.metadata_extractor,
         # Whether the ASR service's own forced aligner runs by default (off).
         "asr_align": settings.asr_align,
-        # Whether a new project looks for 逐字 lyrics in other editions (on).
+        # Whether a new project looks for 逐字 lyrics in other editions (off).
         "word_sync_search": settings.word_sync_search,
-        # Whether the forced aligner is configured; without it there are no per-char
-        # times from the aligner path.
+        # Whether a new project (and the one-shot API by default) looks the song
+        # up in the lyric sources when no lyrics were pasted (on).
+        "fetch_lyrics": settings.fetch_lyrics,
+        # Whether a run with no lyrics asks the LLM where the lines break (on),
+        # and the per-language ceiling it then uses (Chinese 12, Japanese 18).
+        "line_split": settings.line_split,
+        "line_split_max_chars": dict(settings.line_split_max_chars),
+        # Whether the forced aligner is configured; without it there are no
+        # per-character times from the aligner path.
         "char_aligner": bool(settings.char_aligner_url),
         # Cache limits and the sweep interval (see GET /api/storage).
         "housekeeping_interval_min": settings.housekeeping_interval_min,

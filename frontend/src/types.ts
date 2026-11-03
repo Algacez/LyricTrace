@@ -123,6 +123,25 @@ export interface Project extends ProjectSummary {
    * On by default: the studio cut often has no 逐字 data, the live one does.
    */
   word_sync_search?: boolean;
+  /**
+   * Whether a run with no pasted lyrics looks the song up in NetEase / LRCLIB /
+   * LrcApi. On by default: the run fetches the original lyrics automatically.
+   * Off, the run never asks the sources — it aligns the ASR transcript (or the
+   * lyrics you did paste) and nothing is fetched behind your back.
+   */
+  fetch_lyrics?: boolean;
+  /**
+   * Whether a run with no lyrics asks the LLM where the sung lines break.
+   * On by default: a pause is where the singer breathed, not where the line
+   * ended. The LLM only decides cuts — an answer that does not reproduce the
+   * transcript is discarded, so this cannot cost a run.
+   */
+  line_split?: boolean;
+  /**
+   * Characters per line when there are no lyrics, or `null` for per language
+   * (中文 12、日语 18、其余 24). A ceiling, not a target.
+   */
+  line_split_max_chars?: number | null;
   /** The source also supplied a timeline; it is a positional hint, never output. */
   lyrics_reference: boolean;
   /** That source LRC verbatim (studio timings included), for download. */

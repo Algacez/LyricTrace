@@ -105,7 +105,16 @@ def serialize_project(row: dict[str, Any]) -> ProjectOut:
         detect_extras=False if row.get("detect_extras") is None else bool(row.get("detect_extras")),
         llm_merge=False if row.get("llm_merge") is None else bool(row.get("llm_merge")),
         word_sync_search=(
-            True if row.get("word_sync_search") is None else bool(row.get("word_sync_search"))
+            False if row.get("word_sync_search") is None else bool(row.get("word_sync_search"))
+        ),
+        fetch_lyrics=(
+            True if row.get("fetch_lyrics") is None else bool(row.get("fetch_lyrics"))
+        ),
+        line_split=(
+            True if row.get("line_split") is None else bool(row.get("line_split"))
+        ),
+        line_split_max_chars=(
+            None if row.get("line_split_max_chars") is None else int(row["line_split_max_chars"])
         ),
         lyrics_reference=bool((row.get("lyrics_synced") or "").strip()),
         lyrics_reference_lrc=(row.get("lyrics_synced") or None),

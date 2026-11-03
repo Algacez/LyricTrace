@@ -16,6 +16,17 @@ import { Waveform, type WaveformHandle } from "./Waveform";
 interface Props {
   project: Project;
   onProjectChange: (project: Project) => void;
+  /**
+   * Where an edit is saved. The project page writes the timeline through
+   * ``PUT /api/projects/{id}/timeline``; the API cache page writes a cached
+   * job's result through ``PUT /api/align/{job_id}/result``. Same editor, same
+   * per-character times, two records — so the store is injected rather than
+   * branched on inside the editor.
+   */
+  save?: (timeline: Timeline) => Promise<unknown>;
+  /** Where the audio comes from. Defaults to this project's own file; ``null``
+   * when the record has no audio left to play. */
+  audioUrl?: string | null;
 }
 
 type Focus = { line: number; word: number } | null;
@@ -106,7 +117,7 @@ function rangeLimits(line: LyricLine, from: number, to: number) {
   };
 }
 
-export function TimelineEditor({ project, onProjectChange }: Props) {
+export function TimelineEditor({ project, onProjectChange, save, audioUrl }: Props) {
   const history = useHistory<Timeline>(project.timeline ?? EMPTY);
   const timeline = history.value;
   const [focus, setFocus] = useState<Focus>(null);
@@ -122,15 +133,20 @@ export function TimelineEditor({ project, onProjectChange }: Props) {
   const [playing, setPlaying] = useState(false);
   const waveRef = useRef<WaveformHandle>(null);
 
-  const save = useCallback(
+  const persist = useCallback(
     async (value: Timeline) => {
-      const updated = await api.saveTimeline(project.id, { ...value, status: computeStatus(value) });
+      const payload = { ...value, status: computeStatus(value) };
+      if (save) {
+        await save(payload);
+        return;
+      }
+      const updated = await api.saveTimeline(project.id, payload);
       onProjectChange(updated);
     },
-    [project.id, onProjectChange],
+    [project.id, onProjectChange, save],
   );
 
-  const autosave = useAutosave(timeline, save, {
+  const autosave = useAutosave(timeline, persist, {
     delay: 1000,
     enabled: timeline.lines.length > 0,
     signature: JSON.stringify(timeline.lines),
@@ -718,7 +734,7 @@ export function TimelineEditor({ project, onProjectChange }: Props) {
 
       <Waveform
         ref={waveRef}
-        audioUrl={api.audioUrl(project.id)}
+        audioUrl={audioUrl ?? api.audioUrl(project.id)}
         timeline={timeline}
         selectedLine={focus?.line ?? null}
         onSeekLine={(index) => setFocus({ line: index, word: 0 })}
